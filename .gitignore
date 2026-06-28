@@ -1,0 +1,25 @@
+# OS / editor
+.DS_Store
+.idea/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Frontend dependencies and generated output
+Vue/node_modules/
+Vue/dist/
+Vue/dist-ssr/
+Vue/*.local
+Vue/.vscode/*
+!Vue/.vscode/extensions.json
+
+# Go build output
+Server/bin/
+
+# Temporary files
+*.tmp
+*.swp

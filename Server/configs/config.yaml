@@ -1,0 +1,6 @@
+server:
+  http:
+    # 监听地址，0.0.0.0 表示对外可访问；本机调试可用 127.0.0.1
+    addr: 0.0.0.0:8000
+    # 请求超时，迁移的 test-connection / dry-run 可能较慢，设大一些
+    timeout: 60s
