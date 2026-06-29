@@ -15,6 +15,7 @@ import "time"
 // User 用户主体（对应 NPanel user 表）。
 type User struct {
 	SourceID        int64  // 源端 ID
+	SourcePanel     string // 来源面板（npanel/v2board/xiaov2board/xboard/ppanel/sspanel）
 	PasswordHash    string // 密码哈希
 	PasswordAlgo    string // 算法标识（md5/sha256/md5salt/sha256salt/bcrypt/default）
 	PasswordSalt    string // 盐

@@ -1,9 +1,9 @@
 // Package db 提供迁移服务用的底层 MySQL 连接能力。
 //
 // 这里只做"连接 + 简单查询"，不引入 GORM/ent：
-//  - 源端：各面板库结构差异大，用 database/sql 原生查询最灵活；
-//  - 目标端 NPanel：写入时才用 ent client（见迁移方案第 16.2 节），
-//    连接测试阶段同样用原生 SQL 探测表结构即可。
+//   - 源端：各面板库结构差异大，用 database/sql 原生查询最灵活；
+//   - 目标端 NPanel：写入时才用 ent client（见迁移方案第 16.2 节），
+//     连接测试阶段同样用原生 SQL 探测表结构即可。
 package db
 
 import (
@@ -133,6 +133,38 @@ func TableExistsBatch(ctx context.Context, cfg Config, tables []string) (map[str
 		found[name] = true
 	}
 	return found, rows.Err()
+}
+
+// TableColumns 查询指定表的列集合。表不存在时返回空集合。
+func TableColumns(ctx context.Context, cfg Config, table string) (map[string]bool, error) {
+	db, err := sql.Open("mysql", cfg.DSN())
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT COLUMN_NAME FROM information_schema.COLUMNS
+		 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+		cfg.Database, table,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 // placeholders 生成 n 个问号占位符，用于 IN 查询。

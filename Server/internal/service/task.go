@@ -12,14 +12,14 @@ import (
 
 // 各任务的独立进度追踪器（避免互相冲突）。
 var (
-	detectTracker  = progress.NewTracker()
-	dryRunTracker  = progress.NewTracker()
+	detectTracker = progress.NewTracker()
+	dryRunTracker = progress.NewTracker()
 )
 
 // 任务类型，用于 GET /api/task/progress?type=xxx 区分。
 const (
-	TaskDetect  = "detect"
-	TaskDryRun  = "dryrun"
+	TaskDetect = "detect"
+	TaskDryRun = "dryrun"
 )
 
 // StartDetectAsync 异步执行 detect（带进度日志）。
@@ -57,6 +57,10 @@ func (s *MigrationService) runDetect(req *DetectRequest) {
 		return
 	}
 	detectTracker.LogInfo(fmt.Sprintf("识别为 %s 面板", result.Panel))
+	if !isV2boardFamily(result.Panel) {
+		detectTracker.Fail(fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel))
+		return
+	}
 
 	// 执行 adapter 的 detect。
 	detectTracker.Update(progress.PhasePlans, "正在统计表行数", 0, 19, 0)
@@ -67,6 +71,7 @@ func (s *MigrationService) runDetect(req *DetectRequest) {
 		detectTracker.LogError("生成报告失败: " + err.Error())
 		return
 	}
+	report.Panel = string(result.Panel)
 
 	// 缓存结果供 GetTaskProgress 返回（detect 完成后前端轮询拿报告）。
 	lastDetectReport = report
@@ -108,6 +113,10 @@ func (s *MigrationService) runDryRun(req *DryRunRequest) {
 		return
 	}
 	dryRunTracker.LogInfo(fmt.Sprintf("识别为 %s 面板，开始冲突检测...", result.Panel))
+	if !isV2boardFamily(result.Panel) {
+		dryRunTracker.Fail(fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel))
+		return
+	}
 
 	dryRunTracker.Update(progress.PhasePlans, "正在检测冲突", 0, 8, 0)
 	report, err := xiaov2board.DryRun(ctx, cfg)
@@ -115,6 +124,7 @@ func (s *MigrationService) runDryRun(req *DryRunRequest) {
 		dryRunTracker.Fail("预演失败: " + err.Error())
 		return
 	}
+	report.Panel = string(result.Panel)
 
 	// 记录检测到的问题到日志。
 	for _, iss := range report.Issues {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"npanel-migrator/internal/data/canonical"
@@ -74,11 +75,11 @@ func scanUser(rows *sql.Rows) (*canonical.User, error) {
 	}
 
 	return &canonical.User{
-		SourceID:        id,
-		Email:           email.String,
-		PasswordHash:    password.String,
-		// 密码 algo：原样保留（方案 6.1.1）。NULL → default（PHP password_hash 走 default 分支）。
-		PasswordAlgo:    normalizeAlgo(passwordAlgo.String),
+		SourceID:     id,
+		Email:        email.String,
+		PasswordHash: password.String,
+		// 密码 algo：原样保留；NULL 时按 hash 前缀识别 PHP password_hash。
+		PasswordAlgo:    normalizeAlgo(passwordAlgo.String, password.String),
 		PasswordSalt:    passwordSalt.String,
 		BalanceCents:    balance.Int64,
 		CommissionCents: commissionBalance.Int64,
@@ -86,25 +87,36 @@ func scanUser(rows *sql.Rows) (*canonical.User, error) {
 		ReferCode:       token.String,
 		RefererSourceID: inviteUserID.Int64,
 		// banned 反义：banned=1 → enable=false。
-		Enabled:         bannedToEnable(banned.Int64),
-		IsAdmin:         isAdmin.Int64 == 1,
-		CreatedAt:       unixToTime(createdAt.Int64),
-		UpdatedAt:       unixToTime(updatedAt.Int64),
+		Enabled:   bannedToEnable(banned.Int64),
+		IsAdmin:   isAdmin.Int64 == 1,
+		CreatedAt: unixToTime(createdAt.Int64),
+		UpdatedAt: unixToTime(updatedAt.Int64),
 	}, nil
 }
 
 // normalizeAlgo 把 v2board 的 password_algo 归一化为 NPanel algo 值。
-// 方案 6.1.1：NULL 按哈希前缀区分，但 extract 阶段不做前缀检测（简单返回 default）。
-// 更精确的前缀检测（$2→bcrypt, $argon2→重置名单）在 dry-run 已告警，import 这里简化。
-func normalizeAlgo(algo string) string {
+// 方案 6.1.1：password_algo=NULL 时按 hash 前缀区分，$2* 是 PHP bcrypt。
+func normalizeAlgo(algo, hash string) string {
+	algo = strings.ToLower(strings.TrimSpace(algo))
+	hash = strings.TrimSpace(hash)
 	switch algo {
 	case "md5", "sha256", "md5salt", "sha256salt", "bcrypt", "default":
 		return algo
 	case "":
-		return "default" // PHP password_hash（PASSWORD_DEFAULT = bcrypt）走 default 分支
+		if isBcryptHash(hash) {
+			return "bcrypt"
+		}
+		return "default"
 	default:
 		return algo
 	}
+}
+
+func isBcryptHash(hash string) bool {
+	return strings.HasPrefix(hash, "$2a$") ||
+		strings.HasPrefix(hash, "$2b$") ||
+		strings.HasPrefix(hash, "$2x$") ||
+		strings.HasPrefix(hash, "$2y$")
 }
 
 // bannedToEnable v2board banned(0/1) → NPanel enable(bool)。

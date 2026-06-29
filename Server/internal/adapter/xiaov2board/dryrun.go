@@ -63,6 +63,7 @@ func DryRun(ctx context.Context, cfg db.Config) (*DryRunReport, error) {
 	report.checkAbnormalOrders(ctx, cfg)
 	report.checkMissingPlans(ctx, cfg)
 	report.checkOrphanOrders(ctx, cfg)
+	report.checkUnsupportedPasswordHashes(ctx, cfg)
 
 	// 汇总。
 	for _, iss := range report.Issues {
@@ -204,6 +205,26 @@ func (r *DryRunReport) checkOrphanOrders(ctx context.Context, cfg db.Config) {
 		r.add(SeverityWarning, "orphan_order",
 			fmt.Sprintf("存在 %d 个引用了不存在用户的订单，迁移时会因外键失败", count),
 			count, nil)
+	}
+}
+
+// checkUnsupportedPasswordHashes 检测无法保留原密码登录的哈希。
+func (r *DryRunReport) checkUnsupportedPasswordHashes(ctx context.Context, cfg db.Config) {
+	argon2Count, err := db.QueryScalar(ctx, cfg,
+		"SELECT COUNT(*) FROM v2_user WHERE (password_algo IS NULL OR password_algo = '') AND password LIKE '$argon2%'")
+	if err == nil && argon2Count > 0 {
+		r.add(SeverityError, "unsupported_password_hash",
+			fmt.Sprintf("存在 %d 个 Argon2 密码哈希用户，NPanel 当前不支持原密码校验，必须先走重置密码方案", argon2Count),
+			argon2Count, nil)
+	}
+
+	unknownAlgoCount, err := db.QueryScalar(ctx, cfg,
+		"SELECT COUNT(*) FROM v2_user WHERE password_algo IS NOT NULL AND password_algo != '' "+
+			"AND password_algo NOT IN ('md5','sha256','md5salt','sha256salt','bcrypt','default')")
+	if err == nil && unknownAlgoCount > 0 {
+		r.add(SeverityError, "unsupported_password_algo",
+			fmt.Sprintf("存在 %d 个未知 password_algo 用户，无法保证迁移后原密码登录", unknownAlgoCount),
+			unknownAlgoCount, nil)
 	}
 }
 

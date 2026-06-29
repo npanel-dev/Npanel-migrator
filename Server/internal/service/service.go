@@ -31,7 +31,7 @@ func NewMigrationService(uc *biz.MigrationUsecase) *MigrationService {
 
 // TestConnectionRequest 测试连接请求。
 type TestConnectionRequest struct {
-	Side     string `json:"side"`     // "source" | "target"
+	Side     string `json:"side"` // "source" | "target"
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
 	Database string `json:"database"`
@@ -57,9 +57,9 @@ type ConnectionInfo struct {
 	// IsNPanelTarget 目标端是否为有效 NPanel 库（仅 target 有意义）。
 	IsNPanelTarget bool `json:"isNPanelTarget,omitempty"`
 	// 数据库类型与版本（源端和目标端都显示）。
-	DBType     string `json:"dbType,omitempty"`     // mysql / mariadb / percona
-	DBVersion  string `json:"dbVersion,omitempty"`  // 完整版本号 "8.4.6"、"10.11.8-MariaDB"
-	DBMajor    string `json:"dbMajor,omitempty"`    // 主版本号 "5.7"、"8.4"、"10.11"
+	DBType    string `json:"dbType,omitempty"`    // mysql / mariadb / percona
+	DBVersion string `json:"dbVersion,omitempty"` // 完整版本号 "8.4.6"、"10.11.8-MariaDB"
+	DBMajor   string `json:"dbMajor,omitempty"`   // 主版本号 "5.7"、"8.4"、"10.11"
 }
 
 // HealthResponse 健康检查响应。
@@ -116,9 +116,9 @@ func (s *MigrationService) TestConnection(ctx context.Context, req *TestConnecti
 		if err != nil {
 			// 连通但探测失败：仍算连接成功，但提示探测异常。
 			return &TestConnectionResponse{
-				OK:       true,
-				Message:  "数据库连接成功，但面板类型探测失败：" + err.Error(),
-				Detail:   &ConnectionInfo{DBType: dbType.Type, DBVersion: dbType.FullVersion, DBMajor: dbType.MajorMinor},
+				OK:      true,
+				Message: "数据库连接成功，但面板类型探测失败：" + err.Error(),
+				Detail:  &ConnectionInfo{DBType: dbType.Type, DBVersion: dbType.FullVersion, DBMajor: dbType.MajorMinor},
 			}, nil
 		}
 		return &TestConnectionResponse{
@@ -206,10 +206,10 @@ type DetectResponse struct {
 // 这里用独立结构而非直接复用 adapter 类型，避免 service 直接依赖 adapter 包
 // （service 只依赖 biz，adapter 通过 biz 注入更符合分层；当前骨架简化处理）。
 type DetectData struct {
-	Panel     string          `json:"panel"`
-	Tables    []TableStat     `json:"tables"`
-	Metrics   DetectMetrics   `json:"metrics"`
-	TotalRows int64           `json:"totalRows"`
+	Panel     string        `json:"panel"`
+	Tables    []TableStat   `json:"tables"`
+	Metrics   DetectMetrics `json:"metrics"`
+	TotalRows int64         `json:"totalRows"`
 }
 
 // TableStat service 层的表统计 DTO。
@@ -259,13 +259,14 @@ func (s *MigrationService) Detect(ctx context.Context, req *DetectRequest) (*Det
 	}
 
 	// 2. 按探测到的面板类型调用对应 adapter。
-	//    当前只实现 xiaov2board，其他面板待后续迭代。
+	//    xiaov2board 与普通 v2board 同属 v2board-family，共用字段自适应 adapter。
 	switch result.Panel {
-	case detector.PanelXiaoV2board:
+	case detector.PanelXiaoV2board, detector.PanelV2board:
 		report, err := xiaov2board.Detect(ctx, cfg)
 		if err != nil {
 			return &DetectResponse{OK: false, Message: "生成报告失败: " + err.Error()}, nil
 		}
+		report.Panel = string(result.Panel)
 		return &DetectResponse{
 			OK:      true,
 			Message: "报告生成成功",
@@ -275,9 +276,13 @@ func (s *MigrationService) Detect(ctx context.Context, req *DetectRequest) (*Det
 	default:
 		return &DetectResponse{
 			OK:      false,
-			Message: fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前仅支持 xiaov2board）", result.Panel),
+			Message: fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel),
 		}, nil
 	}
+}
+
+func isV2boardFamily(panel detector.PanelType) bool {
+	return panel == detector.PanelXiaoV2board || panel == detector.PanelV2board
 }
 
 // convertReport 把 adapter 的 DetectReport 转成 service 层 DTO。
@@ -329,9 +334,9 @@ type DryRunResponse struct {
 
 // DryRunReportVO dry-run 报告 DTO（与 adapter 的 DryRunReport 字段对齐）。
 type DryRunReportVO struct {
-	Panel   string             `json:"panel"`
-	Issues  []IssueVO          `json:"issues"`
-	Summary DryRunSummaryVO    `json:"summary"`
+	Panel   string          `json:"panel"`
+	Issues  []IssueVO       `json:"issues"`
+	Summary DryRunSummaryVO `json:"summary"`
 }
 
 // IssueVO 单个问题 DTO。
@@ -374,11 +379,12 @@ func (s *MigrationService) DryRun(ctx context.Context, req *DryRunRequest) (*Dry
 	}
 
 	switch result.Panel {
-	case detector.PanelXiaoV2board:
+	case detector.PanelXiaoV2board, detector.PanelV2board:
 		report, err := xiaov2board.DryRun(ctx, cfg)
 		if err != nil {
 			return &DryRunResponse{OK: false, Message: "预演失败: " + err.Error()}, nil
 		}
+		report.Panel = string(result.Panel)
 		return &DryRunResponse{
 			OK:      true,
 			Message: "预演完成",
@@ -388,7 +394,7 @@ func (s *MigrationService) DryRun(ctx context.Context, req *DryRunRequest) (*Dry
 	default:
 		return &DryRunResponse{
 			OK:      false,
-			Message: fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前仅支持 xiaov2board）", result.Panel),
+			Message: fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel),
 		}, nil
 	}
 }

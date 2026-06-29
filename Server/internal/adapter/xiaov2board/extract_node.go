@@ -128,11 +128,19 @@ func extractVmessNodes(ctx context.Context, cfg db.Config) ([]*canonical.ServerN
 
 func extractTrojanNodes(ctx context.Context, cfg db.Config) ([]*canonical.ServerNode, error) {
 	var nodes []*canonical.ServerNode
-	err := db.QueryRows(ctx, cfg,
-		"SELECT id, group_id, name, host, port, server_port, tags, network, network_settings, server_name, allow_insecure, `show`, sort, created_at, updated_at "+
-			"FROM v2_server_trojan WHERE `show`=1 ORDER BY id",
+	columns, err := db.TableColumns(ctx, cfg, tableServerTrojan)
+	if err != nil {
+		return nil, fmt.Errorf("读取 v2_server_trojan 字段失败: %w", err)
+	}
+	hasTransport := columns["network"] && columns["network_settings"]
+	query := "SELECT id, group_id, name, host, port, server_port, tags, server_name, allow_insecure, `show`, sort, created_at, updated_at FROM v2_server_trojan WHERE `show`=1 ORDER BY id"
+	if hasTransport {
+		query = "SELECT id, group_id, name, host, port, server_port, tags, network, network_settings, server_name, allow_insecure, `show`, sort, created_at, updated_at FROM v2_server_trojan WHERE `show`=1 ORDER BY id"
+	}
+	err = db.QueryRows(ctx, cfg,
+		query,
 		func(rows *sql.Rows) error {
-			n, err := scanTrojanNode(rows)
+			n, err := scanTrojanNode(rows, hasTransport)
 			if err != nil {
 				return err
 			}
@@ -168,11 +176,31 @@ func extractSSNodes(ctx context.Context, cfg db.Config) ([]*canonical.ServerNode
 
 func extractHysteriaNodes(ctx context.Context, cfg db.Config) ([]*canonical.ServerNode, error) {
 	var nodes []*canonical.ServerNode
-	err := db.QueryRows(ctx, cfg,
-		"SELECT id, version, group_id, name, host, port, server_port, tags, up_mbps, down_mbps, obfs, obfs_password, server_name, insecure, `show`, sort, created_at, updated_at "+
-			"FROM v2_server_hysteria WHERE `show`=1 ORDER BY id",
+	columns, err := db.TableColumns(ctx, cfg, tableServerHysteria)
+	if err != nil {
+		return nil, fmt.Errorf("读取 v2_server_hysteria 字段失败: %w", err)
+	}
+	hasVersion := columns["version"]
+	hasObfs := columns["obfs"]
+	hasObfsPassword := columns["obfs_password"]
+
+	fields := []string{"id"}
+	if hasVersion {
+		fields = append(fields, "version")
+	}
+	fields = append(fields, "group_id", "name", "host", "port", "server_port", "tags", "up_mbps", "down_mbps")
+	if hasObfs {
+		fields = append(fields, "obfs")
+	}
+	if hasObfsPassword {
+		fields = append(fields, "obfs_password")
+	}
+	fields = append(fields, "server_name", "insecure", "`show`", "sort", "created_at", "updated_at")
+
+	err = db.QueryRows(ctx, cfg,
+		"SELECT "+strings.Join(fields, ", ")+" FROM v2_server_hysteria WHERE `show`=1 ORDER BY id",
 		func(rows *sql.Rows) error {
-			n, err := scanHysteriaNode(rows)
+			n, err := scanHysteriaNode(rows, hasVersion, hasObfs, hasObfsPassword)
 			if err != nil {
 				return err
 			}
@@ -288,13 +316,17 @@ func scanVmessNode(rows *sql.Rows) (*canonical.ServerNode, error) {
 	return newServerNode(id.Int64, "vmess", name.String, host.String, port.String, serverPort.Int64, tags.String, groupID.String, show.Int64 == 1, int32(sort.Int64), proto, createdAt.Int64, updatedAt.Int64), nil
 }
 
-func scanTrojanNode(rows *sql.Rows) (*canonical.ServerNode, error) {
+func scanTrojanNode(rows *sql.Rows, hasTransport bool) (*canonical.ServerNode, error) {
 	var (
 		id, serverPort, allowInsecure, show, sort, createdAt, updatedAt       sql.NullInt64
 		groupID, name, host, port, tags, network, networkSettings, serverName sql.NullString
 	)
-	if err := rows.Scan(&id, &groupID, &name, &host, &port, &serverPort, &tags,
-		&network, &networkSettings, &serverName, &allowInsecure, &show, &sort, &createdAt, &updatedAt); err != nil {
+	scanTargets := []any{&id, &groupID, &name, &host, &port, &serverPort, &tags}
+	if hasTransport {
+		scanTargets = append(scanTargets, &network, &networkSettings)
+	}
+	scanTargets = append(scanTargets, &serverName, &allowInsecure, &show, &sort, &createdAt, &updatedAt)
+	if err := rows.Scan(scanTargets...); err != nil {
 		return nil, err
 	}
 	proto := map[string]any{
@@ -326,13 +358,27 @@ func scanSSNode(rows *sql.Rows) (*canonical.ServerNode, error) {
 	return newServerNode(id.Int64, "shadowsocks", name.String, host.String, port.String, serverPort.Int64, tags.String, groupID.String, show.Int64 == 1, int32(sort.Int64), proto, createdAt.Int64, updatedAt.Int64), nil
 }
 
-func scanHysteriaNode(rows *sql.Rows) (*canonical.ServerNode, error) {
+func scanHysteriaNode(rows *sql.Rows, hasVersion, hasObfs, hasObfsPassword bool) (*canonical.ServerNode, error) {
 	var (
 		id, version, serverPort, upMbps, downMbps, insecure, show, sort, createdAt, updatedAt sql.NullInt64
 		groupID, name, host, port, tags, obfs, obfsPassword, serverName                       sql.NullString
 	)
-	if err := rows.Scan(&id, &version, &groupID, &name, &host, &port, &serverPort, &tags, &upMbps, &downMbps,
-		&obfs, &obfsPassword, &serverName, &insecure, &show, &sort, &createdAt, &updatedAt); err != nil {
+	scanTargets := []any{&id}
+	if hasVersion {
+		scanTargets = append(scanTargets, &version)
+	} else {
+		version.Int64 = 1
+		version.Valid = true
+	}
+	scanTargets = append(scanTargets, &groupID, &name, &host, &port, &serverPort, &tags, &upMbps, &downMbps)
+	if hasObfs {
+		scanTargets = append(scanTargets, &obfs)
+	}
+	if hasObfsPassword {
+		scanTargets = append(scanTargets, &obfsPassword)
+	}
+	scanTargets = append(scanTargets, &serverName, &insecure, &show, &sort, &createdAt, &updatedAt)
+	if err := rows.Scan(scanTargets...); err != nil {
 		return nil, err
 	}
 	protocol := "hysteria"

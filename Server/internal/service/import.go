@@ -7,6 +7,7 @@ import (
 	"npanel-migrator/internal/adapter/xiaov2board"
 	"npanel-migrator/internal/data/canonical"
 	"npanel-migrator/internal/data/db"
+	"npanel-migrator/internal/data/detector"
 	"npanel-migrator/internal/data/progress"
 	"npanel-migrator/internal/data/writer"
 )
@@ -119,6 +120,19 @@ func (s *MigrationService) runImport(req *ImportRequest, batchSize int) {
 
 	ctx := context.Background()
 
+	result, err := detector.Detect(ctx, sourceCfg, req.SourcePanel)
+	if err != nil {
+		globalTracker.Fail("面板探测失败: " + err.Error())
+		globalTracker.LogError("面板探测失败: " + err.Error())
+		return
+	}
+	if !isV2boardFamily(result.Panel) {
+		globalTracker.Fail(fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel))
+		globalTracker.LogError(fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel))
+		return
+	}
+	globalTracker.LogInfo(fmt.Sprintf("识别为 %s 面板，使用 v2board-family adapter", result.Panel))
+
 	// 阶段 1：初始化（建表 + 连接）。
 	globalTracker.LogInfo("正在初始化目标库...")
 	globalTracker.Update(progress.PhaseInit, "初始化目标库", 0, 1, 0)
@@ -192,6 +206,7 @@ func (s *MigrationService) runImport(req *ImportRequest, batchSize int) {
 		globalTracker.LogInfo(fmt.Sprintf("开始迁移用户（共 %d 个）...", totalUsers))
 		globalTracker.Update(progress.PhaseUsers, "迁移用户", 0, int(totalUsers), totalErrors)
 		userErr := xiaov2board.ExtractUsers(ctx, sourceCfg, batchSize, func(batch []*canonical.User) error {
+			setUserSourcePanel(batch, string(result.Panel))
 			idMap, errs, err := writer.WriteUsers(ctx, targetClient, batch)
 			if err != nil {
 				return err
@@ -218,6 +233,7 @@ func (s *MigrationService) runImport(req *ImportRequest, batchSize int) {
 		globalTracker.Update(progress.PhaseReferBackfill, "回填邀请关系", 0, 0, 0)
 		var allUsers []*canonical.User
 		_ = xiaov2board.ExtractUsers(ctx, sourceCfg, batchSize, func(batch []*canonical.User) error {
+			setUserSourcePanel(batch, string(result.Panel))
 			allUsers = append(allUsers, batch...)
 			return nil
 		})
@@ -340,4 +356,10 @@ func (s *MigrationService) runImport(req *ImportRequest, batchSize int) {
 		"迁移完成：用户 %d、订阅 %d（详见日志）",
 		processedUsers, subWritten,
 	))
+}
+
+func setUserSourcePanel(users []*canonical.User, panel string) {
+	for _, u := range users {
+		u.SourcePanel = panel
+	}
 }

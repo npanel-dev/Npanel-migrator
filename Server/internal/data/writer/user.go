@@ -21,6 +21,7 @@ func WriteUsers(ctx context.Context, client *ent.Client, users []*canonical.User
 			SetPassword(u.PasswordHash).
 			SetAlgo(u.PasswordAlgo).
 			SetSalt(u.PasswordSalt).
+			SetSourcePanel(sourcePanelOrUnknown(u.SourcePanel)).
 			SetNillableBalance(&u.BalanceCents).
 			SetNillableCommission(&u.CommissionCents).
 			SetNillableGiftAmount(&u.GiftCents).
@@ -110,4 +111,12 @@ func nilIfZero(v int64) *int64 {
 		return nil
 	}
 	return &v
+}
+
+func sourcePanelOrUnknown(panel string) string {
+	panel = strings.ToLower(strings.TrimSpace(panel))
+	if panel == "" {
+		return "unknown"
+	}
+	return panel
 }

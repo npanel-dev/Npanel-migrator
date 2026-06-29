@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"npanel-migrator/internal/data/canonical"
 	"npanel-migrator/internal/data/db"
@@ -13,15 +14,26 @@ import (
 // 价格档位按方案 6.7 拆分：8 个周期价格列 → 8 条 price option。
 func ExtractPlans(ctx context.Context, cfg db.Config) ([]*canonical.Plan, error) {
 	var plans []*canonical.Plan
+	columns, err := db.TableColumns(ctx, cfg, "v2_plan")
+	if err != nil {
+		return nil, fmt.Errorf("读取 v2_plan 字段失败: %w", err)
+	}
+	hasDeviceLimit := columns["device_limit"]
 
-	err := db.QueryRows(ctx, cfg,
-		"SELECT id, group_id, name, content, transfer_enable, speed_limit, device_limit, "+
-			"`show`, renew, sort, month_price, quarter_price, half_year_price, "+
-			"year_price, two_year_price, three_year_price, onetime_price, reset_price, "+
-			"created_at, updated_at "+
-			"FROM v2_plan ORDER BY id",
+	fields := []string{"id", "group_id", "name", "content", "transfer_enable", "speed_limit"}
+	if hasDeviceLimit {
+		fields = append(fields, "device_limit")
+	}
+	fields = append(fields,
+		"`show`", "renew", "sort", "month_price", "quarter_price", "half_year_price",
+		"year_price", "two_year_price", "three_year_price", "onetime_price", "reset_price",
+		"created_at", "updated_at",
+	)
+
+	err = db.QueryRows(ctx, cfg,
+		"SELECT "+strings.Join(fields, ", ")+" FROM v2_plan ORDER BY id",
 		func(rows *sql.Rows) error {
-			p, err := scanPlan(rows)
+			p, err := scanPlan(rows, hasDeviceLimit)
 			if err != nil {
 				return err
 			}
@@ -36,7 +48,7 @@ func ExtractPlans(ctx context.Context, cfg db.Config) ([]*canonical.Plan, error)
 }
 
 // scanPlan 扫描单行 v2_plan → canonical.Plan（含价格档位拆分）。
-func scanPlan(rows *sql.Rows) (*canonical.Plan, error) {
+func scanPlan(rows *sql.Rows, hasDeviceLimit bool) (*canonical.Plan, error) {
 	var (
 		id             int64
 		groupID        sql.NullInt64
@@ -59,10 +71,16 @@ func scanPlan(rows *sql.Rows) (*canonical.Plan, error) {
 		createdAt      sql.NullInt64
 		updatedAt      sql.NullInt64
 	)
-	if err := rows.Scan(&id, &groupID, &name, &content, &transferEnable, &speedLimit, &deviceLimit,
+	scanTargets := []any{&id, &groupID, &name, &content, &transferEnable, &speedLimit}
+	if hasDeviceLimit {
+		scanTargets = append(scanTargets, &deviceLimit)
+	}
+	scanTargets = append(scanTargets,
 		&show, &renew, &sort, &monthPrice, &quarterPrice, &halfYearPrice,
 		&yearPrice, &twoYearPrice, &threeYearPrice, &onetimePrice, &resetPrice,
-		&createdAt, &updatedAt); err != nil {
+		&createdAt, &updatedAt,
+	)
+	if err := rows.Scan(scanTargets...); err != nil {
 		return nil, err
 	}
 
