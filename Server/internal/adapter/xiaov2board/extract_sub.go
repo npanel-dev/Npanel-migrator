@@ -10,17 +10,28 @@ import (
 	"npanel-migrator/internal/data/db"
 )
 
-// ExtractSubscriptions 从 v2_user 读取当前订阅信息，转换为 canonical.UserSubscription。
-//
-// v2board 的当前订阅压在 v2_user 上（plan_id/u/d/transfer_enable/expired_at/token/uuid），
-// 需要为每个有 plan_id 的用户生成一条 user_subscribe（方案 6.3）。
+// ExtractSubscriptions 从 v2_user 读取当前订阅信息。
+// 非封禁用户若无有效订阅，会返回 NeedsTrial=true，由 writer 分配目标体验套餐。
 func ExtractSubscriptions(ctx context.Context, cfg db.Config) ([]*canonical.UserSubscription, error) {
 	var subs []*canonical.UserSubscription
 
 	err := db.QueryRows(ctx, cfg,
-		"SELECT u.id, u.plan_id, u.group_id, u.u, u.d, u.transfer_enable, u.expired_at, u.token, u.uuid, "+
-			"(SELECT o.id FROM v2_order o WHERE o.user_id = u.id AND o.status IN (1,3) ORDER BY o.id DESC LIMIT 1) AS recent_order_id "+
-			"FROM v2_user u WHERE u.plan_id > 0 ORDER BY u.id",
+		`SELECT u.id, u.plan_id, u.group_id, u.u, u.d, u.transfer_enable,
+		        u.expired_at, u.token, u.uuid,
+		        o.id, o.period, o.paid_at, o.created_at
+		   FROM v2_user u
+		   LEFT JOIN v2_order o ON o.id = (
+		       SELECT o2.id
+		         FROM v2_order o2
+		        WHERE o2.user_id = u.id
+		          AND o2.plan_id = u.plan_id
+		          AND o2.status IN (1, 3)
+		          AND o2.period NOT IN ('deposit', 'reset_price')
+		        ORDER BY o2.id DESC
+		        LIMIT 1
+		   )
+		  WHERE u.banned = 0
+		  ORDER BY u.id`,
 		func(rows *sql.Rows) error {
 			s, err := scanSubscription(rows)
 			if err != nil {
@@ -39,45 +50,50 @@ func ExtractSubscriptions(ctx context.Context, cfg db.Config) ([]*canonical.User
 // scanSubscription 扫描单行 v2_user 订阅信息 → canonical.UserSubscription。
 func scanSubscription(rows *sql.Rows) (*canonical.UserSubscription, error) {
 	var (
-		userID        int64
-		planID        sql.NullInt64
-		groupID       sql.NullInt64
-		upload        sql.NullInt64 // u 字段
-		download      sql.NullInt64 // d 字段
-		transferLimit sql.NullInt64
-		expiredAt     sql.NullInt64
-		token         sql.NullString
-		uuid          sql.NullString
-		recentOrderID sql.NullInt64 // 最近完成订单 ID（关联用）
+		userID         int64
+		planID         sql.NullInt64
+		groupID        sql.NullInt64
+		upload         sql.NullInt64 // u 字段
+		download       sql.NullInt64 // d 字段
+		transferLimit  sql.NullInt64
+		expiredAt      sql.NullInt64
+		token          sql.NullString
+		uuid           sql.NullString
+		recentOrderID  sql.NullInt64 // 最近完成订单 ID（关联用）
+		recentPeriod   sql.NullString
+		orderPaidAt    sql.NullInt64
+		orderCreatedAt sql.NullInt64
 	)
-	if err := rows.Scan(&userID, &planID, &groupID, &upload, &download, &transferLimit, &expiredAt, &token, &uuid, &recentOrderID); err != nil {
+	if err := rows.Scan(
+		&userID, &planID, &groupID, &upload, &download, &transferLimit,
+		&expiredAt, &token, &uuid, &recentOrderID, &recentPeriod, &orderPaidAt, &orderCreatedAt,
+	); err != nil {
 		return nil, err
 	}
 
-	// expired_at 处理（方案 6.3.1）：
-	//   0 → 永久（ExpireTime=nil，writer 转 Unix 0）
-	//   >0 → 具体时间
+	// xiaov2board 的有效订阅判定：
+	// plan_id>0、流量>0，且 expired_at 为 NULL（不限时）或晚于当前时间。
+	// 特别注意 expired_at=0 是已失效，不是永久。
+	needsTrial := subscriptionNeedsTrial(
+		planID.Valid, planID.Int64, transferLimit.Int64,
+		expiredAt.Valid, expiredAt.Int64, nowUnix(),
+	)
+
 	var expireTime *time.Time
-	if expiredAt.Int64 > 0 {
+	if !needsTrial && expiredAt.Valid && expiredAt.Int64 > 0 {
 		t := unixToTime(expiredAt.Int64)
 		expireTime = &t
 	}
 
-	// status 推断：未过期 → Active(1)，已过期 → Expired(3)。
-	status := 1 // Active
-	if expiredAt.Int64 > 0 && expiredAt.Int64 <= nowUnix() {
-		status = 3 // Expired
+	// 优先使用最近一次对应套餐订单的支付/创建时间。
+	startUnix := orderPaidAt.Int64
+	if startUnix <= 0 {
+		startUnix = orderCreatedAt.Int64
 	}
-
-	// StartTime：v2board 无订阅开始时间，用合理近似：
-	//   有过期时间 → 过期前 30 天作为开始
-	//   永久订阅 → 当前时间前 30 天
-	var startTime time.Time
-	if expiredAt.Int64 > 0 {
-		startTime = time.Unix(expiredAt.Int64-86400*30, 0)
-	} else {
-		startTime = time.Unix(nowUnix()-86400*30, 0)
+	if startUnix <= 0 {
+		startUnix = nowUnix()
 	}
+	startTime := unixToTime(startUnix)
 
 	return &canonical.UserSubscription{
 		SourceID:      userID, // 源端用 user id 作为订阅标识
@@ -92,8 +108,27 @@ func scanSubscription(rows *sql.Rows) (*canonical.UserSubscription, error) {
 		TrafficBytes:  transferLimit.Int64,
 		UploadBytes:   upload.Int64,
 		DownloadBytes: download.Int64,
-		Status:        status,
+		Status:        1,
+		NeedsTrial:    needsTrial,
+		SourcePeriod:  recentPeriod.String,
 	}, nil
+}
+
+func subscriptionNeedsTrial(
+	planValid bool,
+	planID int64,
+	traffic int64,
+	expiredValid bool,
+	expiredAt int64,
+	now int64,
+) bool {
+	if !planValid || planID <= 0 || traffic <= 0 {
+		return true
+	}
+	if !expiredValid {
+		return false
+	}
+	return expiredAt <= now
 }
 
 // nowUnix 当前 Unix 秒（避免每次调用 time.Now）。

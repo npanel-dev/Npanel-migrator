@@ -46,6 +46,20 @@ func WriteOrders(
 				builder.SetSubscribeID(subID)
 			}
 		}
+		// 关联客户选择的目标价格档位，并写入商业版订单快照字段。
+		if o.PlanSourceID != 0 && o.Period != "" {
+			key := canonical.PriceOptionMapKey(o.PlanSourceID, o.Period)
+			if optionID, ok := sourceMap.PriceOptionIDs[key]; ok {
+				if option, exists := sourceMap.TargetPriceOptions[optionID]; exists {
+					builder.
+						SetPriceOptionID(option.ID).
+						SetPriceOptionName(option.Name).
+						SetDurationUnit(option.DurationUnit).
+						SetDurationValue(option.DurationValue).
+						SetOptionPrice(option.PriceCents)
+				}
+			}
+		}
 
 		created, err := builder.Save(ctx)
 		if err != nil {
