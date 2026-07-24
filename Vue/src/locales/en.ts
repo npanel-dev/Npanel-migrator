@@ -36,6 +36,7 @@ export default {
   planMappingTitle: 'Plan and Price Option Mapping',
   loadPlanMappings: 'Load / Refresh Plans',
   planMappingNotice: 'Source plans are only used to identify existing entitlements. The migrator will not create plans in the target database. Map each source plan and billing period to an existing NPanel plan and price option.',
+  planMappingIndexWarning: 'The source v2_order table lacks a (user_id, plan_id, id) composite index. A compatibility query is being used; add this index to speed up large databases and the final migration.',
   planMappingEmpty: 'Connect both databases to load plan mappings',
   selectTargetPlan: 'Select target plan',
   selectTargetPriceOption: 'Select target price option',

@@ -39,6 +39,7 @@ export default {
   planMappingTitle: '套餐与价格档位映射',
   loadPlanMappings: '读取/刷新套餐',
   planMappingNotice: '源套餐仅用于识别用户原权益；迁移器不会在目标库创建套餐。请把源套餐及月付、季付等周期映射到 NPanel 已有套餐和价格档位。',
+  planMappingIndexWarning: '源库 v2_order 缺少 (user_id, plan_id, id) 复合索引，迁移器已切换到兼容查询；大库建议补充该索引以加快读取和正式迁移。',
   planMappingEmpty: '连接源端和目标端后读取套餐映射',
   selectTargetPlan: '选择目标套餐',
   selectTargetPriceOption: '选择目标价格档位',

@@ -12,6 +12,25 @@ const http: AxiosInstance = axios.create({
   timeout: 60_000,
 })
 
+// apiErrorMessage 优先返回后端 JSON 中的具体错误，避免界面只显示 Axios 500。
+export function apiErrorMessage(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    const responseData: unknown = error.response?.data
+    if (
+      responseData &&
+      typeof responseData === 'object' &&
+      'message' in responseData &&
+      typeof responseData.message === 'string'
+    ) {
+      return responseData.message
+    }
+    if (typeof responseData === 'string' && responseData.trim()) {
+      return responseData
+    }
+  }
+  return error instanceof Error ? error.message : String(error)
+}
+
 // 数据库连接配置（左侧源端 / 右侧目标端共用）
 export interface DatabaseConfig {
   host: string
@@ -207,6 +226,7 @@ export interface PlanMappingOptionsResponse {
   sourcePlans: SourcePlanMappingOption[]
   targetPlans: TargetPlanMappingOption[]
   inactiveUserCount: number
+  sourceOrderLookupIndexed: boolean
   trialDefaults: {
     subscribeId: number
     timeUnit: string
@@ -277,19 +297,23 @@ export async function getPlanMappingOptions(
   source: DatabaseConfig & { panel?: string },
   target: DatabaseConfig,
 ): Promise<PlanMappingOptionsResponse> {
-  const { data } = await http.post<PlanMappingOptionsResponse>('/plan-mapping/options', {
-    sourceHost: source.host,
-    sourcePort: source.port,
-    sourceDatabase: source.database,
-    sourceUsername: source.username,
-    sourcePassword: source.password,
-    sourcePanel: source.panel,
-    targetHost: target.host,
-    targetPort: target.port,
-    targetDatabase: target.database,
-    targetUsername: target.username,
-    targetPassword: target.password,
-  })
+  const { data } = await http.post<PlanMappingOptionsResponse>(
+    '/plan-mapping/options',
+    {
+      sourceHost: source.host,
+      sourcePort: source.port,
+      sourceDatabase: source.database,
+      sourceUsername: source.username,
+      sourcePassword: source.password,
+      sourcePanel: source.panel,
+      targetHost: target.host,
+      targetPort: target.port,
+      targetDatabase: target.database,
+      targetUsername: target.username,
+      targetPassword: target.password,
+    },
+    { timeout: 300_000 },
+  )
   return data
 }
 

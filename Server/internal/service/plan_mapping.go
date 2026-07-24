@@ -7,10 +7,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"npanel-migrator/internal/adapter/xiaov2board"
 	"npanel-migrator/internal/data/db"
 )
+
+const planMappingQueryTimeout = 5 * time.Minute
 
 // PlanMappingOptionsRequest 同时读取源端套餐和目标端已有套餐。
 type PlanMappingOptionsRequest struct {
@@ -75,12 +78,13 @@ type TargetTrialDefaults struct {
 }
 
 type PlanMappingOptionsResponse struct {
-	OK                bool                      `json:"ok"`
-	Message           string                    `json:"message"`
-	SourcePlans       []SourcePlanMappingOption `json:"sourcePlans"`
-	TargetPlans       []TargetPlanMappingOption `json:"targetPlans"`
-	InactiveUserCount int64                     `json:"inactiveUserCount"`
-	TrialDefaults     TargetTrialDefaults       `json:"trialDefaults"`
+	OK                       bool                      `json:"ok"`
+	Message                  string                    `json:"message"`
+	SourcePlans              []SourcePlanMappingOption `json:"sourcePlans"`
+	TargetPlans              []TargetPlanMappingOption `json:"targetPlans"`
+	InactiveUserCount        int64                     `json:"inactiveUserCount"`
+	TrialDefaults            TargetTrialDefaults       `json:"trialDefaults"`
+	SourceOrderLookupIndexed bool                      `json:"sourceOrderLookupIndexed"`
 }
 
 // GetPlanMappingOptions 只读源、目标数据库，为界面生成套餐映射选项。
@@ -94,6 +98,15 @@ func (s *MigrationService) GetPlanMappingOptions(ctx context.Context, req *PlanM
 		Username: req.TargetUsername, Password: req.TargetPassword,
 	}
 
+	// 目标库先校验，避免目标配置无效时仍在源端执行大表统计。
+	targetPlans, err := readTargetPlans(ctx, targetCfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(targetPlans) == 0 {
+		return nil, fmt.Errorf("目标库没有可映射的套餐，请先在 NPanel 创建套餐")
+	}
+
 	sourcePlans, err := xiaov2board.ExtractPlans(ctx, sourceCfg)
 	if err != nil {
 		return nil, err
@@ -102,7 +115,7 @@ func (s *MigrationService) GetPlanMappingOptions(ctx context.Context, req *PlanM
 	activePeriodCounts := make(map[string]int64)
 	orderCounts := make(map[int64]int64)
 	orderPeriodCounts := make(map[string]int64)
-	if err := db.QueryRows(ctx, sourceCfg,
+	if err := db.QueryRowsWithTimeout(ctx, sourceCfg, planMappingQueryTimeout,
 		`SELECT plan_id, COUNT(*)
 		   FROM v2_user
 		  WHERE banned = 0
@@ -120,38 +133,11 @@ func (s *MigrationService) GetPlanMappingOptions(ctx context.Context, req *PlanM
 		}); err != nil {
 		return nil, fmt.Errorf("统计源套餐有效用户失败: %w", err)
 	}
-	if err := db.QueryRows(ctx, sourceCfg,
-		`SELECT u.plan_id, o.period, COUNT(*)
-		   FROM v2_user u
-		   JOIN v2_order o ON o.id = (
-		       SELECT o2.id
-		         FROM v2_order o2
-		        WHERE o2.user_id = u.id
-		          AND o2.plan_id = u.plan_id
-		          AND o2.status IN (1, 3)
-		          AND o2.period NOT IN ('deposit', 'reset_price')
-		        ORDER BY o2.id DESC
-		        LIMIT 1
-		   )
-		  WHERE u.banned = 0
-		    AND COALESCE(u.plan_id, 0) > 0
-		    AND COALESCE(u.transfer_enable, 0) > 0
-		    AND (u.expired_at IS NULL OR u.expired_at > UNIX_TIMESTAMP())
-		  GROUP BY u.plan_id, o.period`,
-		func(rows *sql.Rows) error {
-			var planID, count int64
-			var period sql.NullString
-			if err := rows.Scan(&planID, &period, &count); err != nil {
-				return err
-			}
-			if period.Valid && period.String != "" {
-				activePeriodCounts[fmt.Sprintf("%d:%s", planID, period.String)] = count
-			}
-			return nil
-		}); err != nil {
+	activePeriodCounts, sourceOrderLookupIndexed, err := xiaov2board.ActiveSubscriptionPeriodCounts(ctx, sourceCfg)
+	if err != nil {
 		return nil, fmt.Errorf("统计源套餐周期有效用户失败: %w", err)
 	}
-	if err := db.QueryRows(ctx, sourceCfg,
+	if err := db.QueryRowsWithTimeout(ctx, sourceCfg, planMappingQueryTimeout,
 		`SELECT plan_id, period, COUNT(*)
 		   FROM v2_order
 		  WHERE COALESCE(plan_id, 0) > 0
@@ -171,7 +157,7 @@ func (s *MigrationService) GetPlanMappingOptions(ctx context.Context, req *PlanM
 		}); err != nil {
 		return nil, fmt.Errorf("统计源套餐历史订单失败: %w", err)
 	}
-	inactiveCount, err := db.QueryScalar(ctx, sourceCfg,
+	inactiveCount, err := db.QueryScalarWithTimeout(ctx, sourceCfg, planMappingQueryTimeout,
 		`SELECT COUNT(*) FROM v2_user
 		  WHERE banned = 0
 		    AND NOT (
@@ -249,16 +235,13 @@ func (s *MigrationService) GetPlanMappingOptions(ctx context.Context, req *PlanM
 		return sourceOptions[i].ID < sourceOptions[j].ID
 	})
 
-	targetPlans, err := readTargetPlans(ctx, targetCfg)
-	if err != nil {
-		return nil, err
-	}
 	trialDefaults := readTargetTrialDefaults(ctx, targetCfg)
 
 	return &PlanMappingOptionsResponse{
 		OK: true, Message: "套餐映射选项读取成功",
 		SourcePlans: sourceOptions, TargetPlans: targetPlans,
 		InactiveUserCount: inactiveCount, TrialDefaults: trialDefaults,
+		SourceOrderLookupIndexed: sourceOrderLookupIndexed,
 	}, nil
 }
 
