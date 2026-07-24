@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -167,6 +168,68 @@ func TableColumns(ctx context.Context, cfg Config, table string) (map[string]boo
 	return columns, rows.Err()
 }
 
+// TableHasIndexPrefix 检查表上是否存在以 columns 为前导列的索引。
+// 只读 information_schema，不会修改源数据库。
+func TableHasIndexPrefix(ctx context.Context, cfg Config, table string, columns []string) (bool, error) {
+	db, err := sql.Open("mysql", cfg.DSN())
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME
+		   FROM information_schema.STATISTICS
+		  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+		  ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
+		cfg.Database, table,
+	)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	indexes := make(map[string][]string)
+	for rows.Next() {
+		var indexName string
+		var columnName sql.NullString
+		var sequence int
+		if err := rows.Scan(&indexName, &sequence, &columnName); err != nil {
+			return false, err
+		}
+		indexes[indexName] = append(indexes[indexName], columnName.String)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return hasIndexPrefix(indexes, columns), nil
+}
+
+func hasIndexPrefix(indexes map[string][]string, columns []string) bool {
+	if len(columns) == 0 {
+		return true
+	}
+	for _, indexColumns := range indexes {
+		if len(indexColumns) < len(columns) {
+			continue
+		}
+		matched := true
+		for i, column := range columns {
+			if !strings.EqualFold(indexColumns[i], column) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 // placeholders 生成 n 个问号占位符，用于 IN 查询。
 // n<=0 时返回 "NULL"，使 IN (NULL) 恒为 false（合法且不会语法错误）。
 func placeholders(n int) string {
@@ -228,13 +291,24 @@ func CountRowsBatch(ctx context.Context, cfg Config, tables []string) (map[strin
 // 用于 detect 阶段统计金额总和、流量总和等关键指标。
 // 若查询无结果（如 SUM 空表），返回 0 + nil。
 func QueryScalar(ctx context.Context, cfg Config, query string, args ...any) (int64, error) {
+	return QueryScalarWithTimeout(ctx, cfg, 5*time.Second, query, args...)
+}
+
+// QueryScalarWithTimeout 与 QueryScalar 相同，但允许大表聚合使用独立超时。
+func QueryScalarWithTimeout(
+	ctx context.Context,
+	cfg Config,
+	timeout time.Duration,
+	query string,
+	args ...any,
+) (int64, error) {
 	db, err := sql.Open("mysql", cfg.DSN())
 	if err != nil {
 		return 0, err
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// 用 sql.NullInt64 容忍 NULL（SUM 空表返回 NULL）。
@@ -253,13 +327,25 @@ func QueryScalar(ctx context.Context, cfg Config, query string, args ...any) (in
 // 用于 dry-run 阶段查询冲突明细（如重复邮箱列表）。
 // scanFn 返回 error 时中止扫描（非 nil 会向上传递，io.EOF 视为正常结束）。
 func QueryRows(ctx context.Context, cfg Config, query string, scanFn func(rows *sql.Rows) error, args ...any) error {
+	return QueryRowsWithTimeout(ctx, cfg, 10*time.Second, query, scanFn, args...)
+}
+
+// QueryRowsWithTimeout 与 QueryRows 相同，但允许调用方为大表只读任务设置独立超时。
+func QueryRowsWithTimeout(
+	ctx context.Context,
+	cfg Config,
+	timeout time.Duration,
+	query string,
+	scanFn func(rows *sql.Rows) error,
+	args ...any,
+) error {
 	db, err := sql.Open("mysql", cfg.DSN())
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	rows, err := db.QueryContext(ctx, query, args...)

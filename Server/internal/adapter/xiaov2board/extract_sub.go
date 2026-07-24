@@ -15,23 +15,25 @@ import (
 func ExtractSubscriptions(ctx context.Context, cfg db.Config) ([]*canonical.UserSubscription, error) {
 	var subs []*canonical.UserSubscription
 
-	err := db.QueryRows(ctx, cfg,
+	hasFastIndex, err := HasFastOrderLookupIndex(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("检查 v2_order 查询索引失败: %w", err)
+	}
+	query := fmt.Sprintf(
 		`SELECT u.id, u.plan_id, u.group_id, u.u, u.d, u.transfer_enable,
 		        u.expired_at, u.token, u.uuid,
 		        o.id, o.period, o.paid_at, o.created_at
 		   FROM v2_user u
-		   LEFT JOIN v2_order o ON o.id = (
-		       SELECT o2.id
-		         FROM v2_order o2
-		        WHERE o2.user_id = u.id
-		          AND o2.plan_id = u.plan_id
-		          AND o2.status IN (1, 3)
-		          AND o2.period NOT IN ('deposit', 'reset_price')
-		        ORDER BY o2.id DESC
-		        LIMIT 1
-		   )
+		   %s
 		  WHERE u.banned = 0
 		  ORDER BY u.id`,
+		latestRelevantOrderJoinSQL(hasFastIndex),
+	)
+	err = db.QueryRowsWithTimeout(
+		ctx,
+		cfg,
+		sourceOrderLookupTimeout,
+		query,
 		func(rows *sql.Rows) error {
 			s, err := scanSubscription(rows)
 			if err != nil {

@@ -177,6 +177,14 @@
         :closable="false"
         show-icon
       />
+      <el-alert
+        v-if="mappingOptions && !mappingOptions.sourceOrderLookupIndexed"
+        :title="t('planMappingIndexWarning')"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="plan-mapping__index-warning"
+      />
 
       <el-empty v-if="!mappingOptions" :description="t('planMappingEmpty')" />
 
@@ -418,6 +426,7 @@ import ImportProgressCard from '@/components/ImportProgressCard.vue'
 import TaskProgressDialog from '@/components/TaskProgressDialog.vue'
 import message from '@/utils/message'
 import {
+  apiErrorMessage,
   getProgress,
   getPlanMappingOptions,
   getTaskProgress,
@@ -762,7 +771,7 @@ async function onLoadPlanMappings() {
     message.success(response.message)
   } catch (e) {
     mappingOptions.value = null
-    message.error(t('msgPlanMappingFailed', { err: String(e) }))
+    message.error(t('msgPlanMappingFailed', { err: apiErrorMessage(e) }))
   } finally {
     mappingLoading.value = false
   }
@@ -1034,6 +1043,10 @@ function formatDBLabel(detail: { dbType?: string; dbMajor?: string }): string {
 
   &__content {
     margin-top: 16px;
+  }
+
+  &__index-warning {
+    margin-top: 12px;
   }
 
   &__plan {
