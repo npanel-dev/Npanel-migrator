@@ -160,6 +160,71 @@ export async function dryRun(
 
 // ---- import 执行阶段 ----
 
+export interface SourcePlanOption {
+  sourcePeriod: string
+  name: string
+  optionType: string
+  durationUnit: string
+  durationValue: number
+  priceCents: number
+  activeUserCount: number
+  orderCount: number
+}
+
+export interface SourcePlanMappingOption {
+  id: number
+  name: string
+  activeUserCount: number
+  orderCount: number
+  priceOptions: SourcePlanOption[]
+}
+
+export interface TargetPriceOption {
+  id: number
+  subscribeId: number
+  code: string
+  name: string
+  optionType: string
+  durationUnit: string
+  durationValue: number
+  priceCents: number
+  show: boolean
+  sell: boolean
+}
+
+export interface TargetPlanMappingOption {
+  id: number
+  name: string
+  trafficBytes: number
+  show: boolean
+  sell: boolean
+  priceOptions: TargetPriceOption[]
+}
+
+export interface PlanMappingOptionsResponse {
+  ok: boolean
+  message: string
+  sourcePlans: SourcePlanMappingOption[]
+  targetPlans: TargetPlanMappingOption[]
+  inactiveUserCount: number
+  trialDefaults: {
+    subscribeId: number
+    timeUnit: string
+    timeValue: number
+  }
+}
+
+export interface PeriodMapping {
+  sourcePeriod: string
+  targetPriceOptionId: number
+}
+
+export interface PlanMapping {
+  sourcePlanId: number
+  targetSubscribeId: number
+  periodMappings: PeriodMapping[]
+}
+
 export interface ImportRequest {
   sourceHost: string
   sourcePort: number
@@ -175,6 +240,12 @@ export interface ImportRequest {
   batchSize?: number
   // 勾选的迁移模块（空数组=完整迁移）
   modules?: string[]
+  planMappings: PlanMapping[]
+  trialAssignment: {
+    targetSubscribeId: number
+    durationUnit: string
+    durationValue: number
+  }
 }
 
 export interface ImportResponse {
@@ -199,6 +270,26 @@ export interface ProgressSnapshot {
 // 启动迁移（异步，返回任务已启动确认）
 export async function startImport(req: ImportRequest): Promise<ImportResponse> {
   const { data } = await http.post<ImportResponse>('/import', req)
+  return data
+}
+
+export async function getPlanMappingOptions(
+  source: DatabaseConfig & { panel?: string },
+  target: DatabaseConfig,
+): Promise<PlanMappingOptionsResponse> {
+  const { data } = await http.post<PlanMappingOptionsResponse>('/plan-mapping/options', {
+    sourceHost: source.host,
+    sourcePort: source.port,
+    sourceDatabase: source.database,
+    sourceUsername: source.username,
+    sourcePassword: source.password,
+    sourcePanel: source.panel,
+    targetHost: target.host,
+    targetPort: target.port,
+    targetDatabase: target.database,
+    targetUsername: target.username,
+    targetPassword: target.password,
+  })
   return data
 }
 

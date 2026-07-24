@@ -12,8 +12,9 @@ import (
 // registerAPIRoutes 注册 /api/* 业务接口路由。
 //
 // 当前提供两个接口：
-//   GET  /api/health            健康检查
-//   POST /api/test-connection   测试数据库连接（源端探测面板/目标端校验 NPanel）
+//
+//	GET  /api/health            健康检查
+//	POST /api/test-connection   测试数据库连接（源端探测面板/目标端校验 NPanel）
 //
 // 下一步会接入 detect / dry-run / import / progress。
 func registerAPIRoutes(srv *khttp.Server, svc *service.MigrationService) {
@@ -117,6 +118,23 @@ func registerAPIRoutes(srv *khttp.Server, svc *service.MigrationService) {
 		}
 
 		resp, err := svc.DryRun(ctx, &req)
+		if err != nil {
+			return writeError(ctx, 500, err.Error())
+		}
+		return ctx.JSON(200, resp)
+	})
+
+	// POST /api/plan-mapping/options —— 读取源套餐与目标已有套餐供用户映射。
+	route.POST("/plan-mapping/options", func(ctx khttp.Context) error {
+		body, err := io.ReadAll(ctx.Request().Body)
+		if err != nil {
+			return writeError(ctx, 400, "读取请求体失败: "+err.Error())
+		}
+		var req service.PlanMappingOptionsRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return writeError(ctx, 400, "解析请求体失败: "+err.Error())
+		}
+		resp, err := svc.GetPlanMappingOptions(ctx, &req)
 		if err != nil {
 			return writeError(ctx, 500, err.Error())
 		}

@@ -10,7 +10,10 @@
 //   - 时间：time.Time
 package canonical
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // User 用户主体（对应 NPanel user 表）。
 type User struct {
@@ -95,6 +98,11 @@ type UserSubscription struct {
 	DownloadBytes int64 // 已下载
 	// Status 源端状态（0-5 等），由 adapter 映射；writer 按方案 6.3.2 处理 status=4。
 	Status int
+	// NeedsTrial 表示源用户没有有效订阅（无套餐、已过期、流量为 0），
+	// writer 应按迁移任务选择的目标体验套餐创建新订阅。
+	NeedsTrial bool
+	// SourcePeriod 是最近一次有效套餐订单的源周期键（month_price 等）。
+	SourcePeriod string
 }
 
 // Order 订单（对应 NPanel order 表）。
@@ -118,20 +126,39 @@ type Order struct {
 
 // SourceMap 源 ID → 目标 ID 的映射（账本，二阶段回填用）。
 type SourceMap struct {
-	UserIDs      map[int64]int64 // sourceUserID -> npanelUserID
-	PlanIDs      map[int64]int64 // sourcePlanID -> npanelSubscribeID
-	OrderIDs     map[int64]int64 // sourceOrderID -> npanelOrderID
-	NodeGroupIDs map[int64]int64 // sourceGroupID -> npanelNodeGroupID
+	UserIDs            map[int64]int64             // sourceUserID -> npanelUserID
+	PlanIDs            map[int64]int64             // sourcePlanID -> npanelSubscribeID
+	OrderIDs           map[int64]int64             // sourceOrderID -> npanelOrderID
+	NodeGroupIDs       map[int64]int64             // sourceGroupID -> npanelNodeGroupID
+	PriceOptionIDs     map[string]int64            // sourcePlanID:period -> npanelPriceOptionID
+	TargetPriceOptions map[int64]TargetPriceOption // npanelPriceOptionID -> snapshot
 }
 
 // NewSourceMap 创建空的映射表。
 func NewSourceMap() *SourceMap {
 	return &SourceMap{
-		UserIDs:      make(map[int64]int64),
-		PlanIDs:      make(map[int64]int64),
-		OrderIDs:     make(map[int64]int64),
-		NodeGroupIDs: make(map[int64]int64),
+		UserIDs:            make(map[int64]int64),
+		PlanIDs:            make(map[int64]int64),
+		OrderIDs:           make(map[int64]int64),
+		NodeGroupIDs:       make(map[int64]int64),
+		PriceOptionIDs:     make(map[string]int64),
+		TargetPriceOptions: make(map[int64]TargetPriceOption),
 	}
+}
+
+// PriceOptionMapKey 返回套餐周期映射的稳定键。
+func PriceOptionMapKey(sourcePlanID int64, sourcePeriod string) string {
+	return fmt.Sprintf("%d:%s", sourcePlanID, sourcePeriod)
+}
+
+// TargetPriceOption 是目标价格档位的订单快照所需字段。
+type TargetPriceOption struct {
+	ID            int64
+	SubscribeID   int64
+	Name          string
+	DurationUnit  string
+	DurationValue int64
+	PriceCents    int64
 }
 
 // Coupon 优惠券（对应 NPanel coupon 表）。

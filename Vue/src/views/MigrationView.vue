@@ -158,6 +158,147 @@
       </el-col>
     </el-row>
 
+    <el-card v-if="sourceConnected && targetConnected" shadow="hover" class="plan-mapping">
+      <template #header>
+        <div class="card-header plan-mapping__header">
+          <div>
+            <el-icon><Connection /></el-icon>
+            <span>{{ t('planMappingTitle') }}</span>
+          </div>
+          <el-button type="primary" plain :loading="mappingLoading" @click="onLoadPlanMappings">
+            {{ t('loadPlanMappings') }}
+          </el-button>
+        </div>
+      </template>
+
+      <el-alert
+        :title="t('planMappingNotice')"
+        type="info"
+        :closable="false"
+        show-icon
+      />
+
+      <el-empty v-if="!mappingOptions" :description="t('planMappingEmpty')" />
+
+      <div v-else class="plan-mapping__content">
+        <div
+          v-for="sourcePlan in mappingOptions.sourcePlans"
+          :key="sourcePlan.id"
+          class="plan-mapping__plan"
+        >
+          <div class="plan-mapping__plan-row">
+            <div class="plan-mapping__source">
+              <strong>{{ sourcePlan.name }}</strong>
+              <el-tag size="small" type="info">ID {{ sourcePlan.id }}</el-tag>
+              <el-tag v-if="sourcePlan.activeUserCount > 0" size="small" type="warning">
+                {{ t('activeUsersCount', { n: sourcePlan.activeUserCount }) }}
+              </el-tag>
+              <el-tag v-if="sourcePlan.orderCount > 0" size="small" type="info">
+                {{ t('historyOrdersCount', { n: sourcePlan.orderCount }) }}
+              </el-tag>
+            </div>
+            <el-icon><Right /></el-icon>
+            <el-select
+              v-model="planSelections[sourcePlan.id]"
+              clearable
+              filterable
+              :placeholder="t('selectTargetPlan')"
+              class="plan-mapping__select"
+              @change="onTargetPlanChange(sourcePlan)"
+            >
+              <el-option
+                v-for="targetPlan in mappingOptions.targetPlans"
+                :key="targetPlan.id"
+                :value="targetPlan.id"
+                :label="`${targetPlan.name} (ID ${targetPlan.id})`"
+              >
+                <span>{{ targetPlan.name }} (ID {{ targetPlan.id }})</span>
+                <el-tag v-if="!targetPlan.sell" size="small" type="info" style="margin-left: 8px">
+                  {{ t('notForSale') }}
+                </el-tag>
+              </el-option>
+            </el-select>
+          </div>
+
+          <div v-if="planSelections[sourcePlan.id]" class="plan-mapping__periods">
+            <div
+              v-for="sourceOption in sourcePlan.priceOptions"
+              :key="sourceOption.sourcePeriod"
+              class="plan-mapping__period-row"
+            >
+              <div class="plan-mapping__period-source">
+                <span>{{ sourceOption.name }}</span>
+                <small>
+                  {{ formatDuration(sourceOption.durationUnit, sourceOption.durationValue) }}
+                  · {{ formatPrice(sourceOption.priceCents) }}
+                </small>
+                <el-tag v-if="sourceOption.activeUserCount > 0" size="small" type="danger">
+                  {{ t('activeUsersCount', { n: sourceOption.activeUserCount }) }}
+                </el-tag>
+                <el-tag v-if="sourceOption.orderCount > 0" size="small" type="info">
+                  {{ t('historyOrdersCount', { n: sourceOption.orderCount }) }}
+                </el-tag>
+              </div>
+              <el-icon><Right /></el-icon>
+              <el-select
+                v-model="periodSelections[periodKey(sourcePlan.id, sourceOption.sourcePeriod)]"
+                clearable
+                filterable
+                :placeholder="t('selectTargetPriceOption')"
+                class="plan-mapping__select"
+              >
+                <el-option
+                  v-for="targetOption in targetPriceOptions(sourcePlan.id)"
+                  :key="targetOption.id"
+                  :value="targetOption.id"
+                  :label="`${targetOption.name} · ${formatDuration(targetOption.durationUnit, targetOption.durationValue)}`"
+                />
+              </el-select>
+            </div>
+          </div>
+        </div>
+
+        <el-divider />
+
+        <div class="plan-mapping__trial">
+          <div>
+            <strong>{{ t('trialAssignmentTitle') }}</strong>
+            <p>{{ t('trialAssignmentDesc', { n: mappingOptions.inactiveUserCount }) }}</p>
+          </div>
+          <el-select
+            v-model="trialAssignment.targetSubscribeId"
+            filterable
+            :placeholder="t('selectTrialPlan')"
+            class="plan-mapping__select"
+          >
+            <el-option
+              v-for="targetPlan in mappingOptions.targetPlans"
+              :key="targetPlan.id"
+              :value="targetPlan.id"
+              :label="`${targetPlan.name} (ID ${targetPlan.id})`"
+            />
+          </el-select>
+          <el-input-number
+            v-model="trialAssignment.durationValue"
+            :min="1"
+            :max="9999"
+            :disabled="trialAssignment.durationUnit === 'NoLimit'"
+          />
+          <el-select v-model="trialAssignment.durationUnit" style="width: 130px">
+            <el-option value="Minute" :label="t('durationMinute')" />
+            <el-option value="Hour" :label="t('durationHour')" />
+            <el-option value="Day" :label="t('durationDay')" />
+            <el-option value="Week" :label="t('durationWeek')" />
+            <el-option value="Month" :label="t('durationMonth')" />
+            <el-option value="quarter" :label="t('durationQuarter')" />
+            <el-option value="half_year" :label="t('durationHalfYear')" />
+            <el-option value="Year" :label="t('durationYear')" />
+            <el-option value="NoLimit" :label="t('durationNoLimit')" />
+          </el-select>
+        </div>
+      </div>
+    </el-card>
+
     <!-- 底部：迁移模式选择 -->
     <el-card shadow="hover" class="migration-mode">
       <template #header>
@@ -196,6 +337,7 @@
             v-for="m in moduleOptions"
             :key="m.value"
             :value="m.value"
+            :disabled="m.value === 'users' && requiresUsers"
             class="migration-modules__item"
           >
             <div class="migration-modules__label">
@@ -224,7 +366,7 @@
         </el-button>
         <el-button
           type="danger"
-          :disabled="!ready || importRunning"
+          :disabled="mode === 'archive' || !ready || importRunning"
           :loading="importing"
           @click="onImport"
         >
@@ -268,7 +410,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
-import { Aim, Connection, DataAnalysis, Operation } from '@element-plus/icons-vue'
+import { Aim, Connection, DataAnalysis, Operation, Right } from '@element-plus/icons-vue'
 import DefaultLayout from '@/layouts/DefaultLayout.vue'
 import DetectReportCard from '@/components/DetectReportCard.vue'
 import DryRunReportCard from '@/components/DryRunReportCard.vue'
@@ -277,6 +419,7 @@ import TaskProgressDialog from '@/components/TaskProgressDialog.vue'
 import message from '@/utils/message'
 import {
   getProgress,
+  getPlanMappingOptions,
   getTaskProgress,
   startDetectAsync,
   startDryRunAsync,
@@ -286,6 +429,9 @@ import {
   type DetectData,
   type DryRunReport,
   type ProgressSnapshot,
+  type PlanMappingOptionsResponse,
+  type SourcePlanMappingOption,
+  type TargetPriceOption,
   type TaskProgressSnapshot,
   type TestConnectionResult,
 } from '@/api'
@@ -347,6 +493,20 @@ const targetResult = ref<TestConnectionResult | null>(null)
 const mode = ref('full')
 // 选中的迁移模块（完整迁移默认全选）。
 const selectedModules = ref<string[]>([...allModuleValues])
+const userDependentModules = ['orders', 'subscriptions', 'tickets']
+const requiresUsers = computed(
+  () => selectedModules.value.some((module) => userDependentModules.includes(module)),
+)
+
+const mappingLoading = ref(false)
+const mappingOptions = ref<PlanMappingOptionsResponse | null>(null)
+const planSelections = reactive<Record<number, number | undefined>>({})
+const periodSelections = reactive<Record<string, number | undefined>>({})
+const trialAssignment = reactive({
+  targetSubscribeId: undefined as number | undefined,
+  durationUnit: 'Day',
+  durationValue: 7,
+})
 
 // 监听模式切换：选 full 时全选模块，选 archive 时清空（归档不写入）。
 watch(mode, (newMode) => {
@@ -360,6 +520,10 @@ watch(mode, (newMode) => {
 // 模块勾选变化时：如果与全选不一致且当前非 custom，自动切到 custom。
 watch(selectedModules, (val) => {
   if (mode.value === 'archive') return
+  if (val.some((module) => userDependentModules.includes(module)) && !val.includes('users')) {
+    selectedModules.value = [...val, 'users']
+    return
+  }
   const isAll = val.length === allModuleValues.length &&
     allModuleValues.every((m) => val.includes(m))
   if (isAll && mode.value !== 'full') {
@@ -400,8 +564,40 @@ let taskTimer: ReturnType<typeof setInterval> | null = null
 let currentTaskType: 'detect' | 'dryrun' = 'detect'
 
 const sourceConnected = computed(() => sourceResult.value?.ok ?? false)
+const targetConnected = computed(
+  () => Boolean(targetResult.value?.ok && targetResult.value.detail?.isNPanelTarget),
+)
+const mappingNeeded = computed(
+  () => mode.value !== 'archive' &&
+    selectedModules.value.some((module) => ['plans', 'orders', 'subscriptions'].includes(module)),
+)
+const mappingReady = computed(() => {
+  if (!mappingNeeded.value) return true
+  const options = mappingOptions.value
+  if (!options) return false
+  for (const sourcePlan of options.sourcePlans) {
+    if (sourcePlan.activeUserCount <= 0) continue
+    if (!planSelections[sourcePlan.id]) return false
+    for (const sourceOption of sourcePlan.priceOptions) {
+      if (
+        sourceOption.activeUserCount > 0 &&
+        !periodSelections[periodKey(sourcePlan.id, sourceOption.sourcePeriod)]
+      ) {
+        return false
+      }
+    }
+  }
+  if (options.inactiveUserCount > 0) {
+    return Boolean(
+      trialAssignment.targetSubscribeId &&
+      trialAssignment.durationUnit &&
+      trialAssignment.durationValue > 0,
+    )
+  }
+  return true
+})
 const ready = computed(
-  () => sourceResult.value?.ok && targetResult.value?.ok,
+  () => sourceConnected.value && targetConnected.value && mappingReady.value,
 )
 
 // import 运行中时禁用"开始迁移"按钮，避免重复触发。
@@ -481,6 +677,9 @@ async function onTestSource() {
           }
         }
       }
+      if (targetConnected.value) {
+        await onLoadPlanMappings()
+      }
     } else {
       message.error(sourceResult.value.message || t('msgSourceConnectFailed'))
     }
@@ -506,6 +705,9 @@ async function onTestTarget() {
     if (targetResult.value.ok) {
       if (targetResult.value.detail?.isNPanelTarget) {
         message.success(targetResult.value.message || t('msgTargetConnected'))
+        if (sourceConnected.value) {
+          await onLoadPlanMappings()
+        }
       } else {
         message.warning(targetResult.value.message || t('msgTargetNotNPanel'))
       }
@@ -518,6 +720,114 @@ async function onTestTarget() {
   } finally {
     targetTesting.value = false
   }
+}
+
+async function onLoadPlanMappings() {
+  if (!sourceConnected.value || !targetConnected.value) return
+  mappingLoading.value = true
+  try {
+    const response = await getPlanMappingOptions(
+      {
+        host: source.host, port: source.port, database: source.database,
+        username: source.username, password: source.password,
+        panel: source.panel === 'auto' ? undefined : source.panel,
+      },
+      target,
+    )
+    if (!response.ok) {
+      message.error(response.message)
+      return
+    }
+    mappingOptions.value = response
+    clearMappingSelections()
+    trialAssignment.targetSubscribeId = response.targetPlans.some(
+      (plan) => plan.id === response.trialDefaults.subscribeId,
+    )
+      ? response.trialDefaults.subscribeId
+      : undefined
+    trialAssignment.durationUnit = response.trialDefaults.timeUnit || 'Day'
+    trialAssignment.durationValue = response.trialDefaults.timeValue > 0
+      ? response.trialDefaults.timeValue
+      : 7
+
+    for (const sourcePlan of response.sourcePlans) {
+      const sameNamePlans = response.targetPlans.filter(
+        (plan) => normalizeName(plan.name) === normalizeName(sourcePlan.name),
+      )
+      if (sameNamePlans.length === 1) {
+        planSelections[sourcePlan.id] = sameNamePlans[0].id
+        onTargetPlanChange(sourcePlan)
+      }
+    }
+    message.success(response.message)
+  } catch (e) {
+    mappingOptions.value = null
+    message.error(t('msgPlanMappingFailed', { err: String(e) }))
+  } finally {
+    mappingLoading.value = false
+  }
+}
+
+function clearMappingSelections() {
+  Object.keys(planSelections).forEach((key) => delete planSelections[Number(key)])
+  Object.keys(periodSelections).forEach((key) => delete periodSelections[key])
+}
+
+function normalizeName(value: string): string {
+  return value.trim().toLocaleLowerCase().replace(/\s+/g, '')
+}
+
+function periodKey(sourcePlanId: number, sourcePeriod: string): string {
+  return `${sourcePlanId}:${sourcePeriod}`
+}
+
+function targetPriceOptions(sourcePlanId: number): TargetPriceOption[] {
+  const targetPlanId = planSelections[sourcePlanId]
+  const targetPlan = mappingOptions.value?.targetPlans.find((plan) => plan.id === targetPlanId)
+  return targetPlan?.priceOptions ?? []
+}
+
+function onTargetPlanChange(sourcePlan: SourcePlanMappingOption) {
+  for (const sourceOption of sourcePlan.priceOptions) {
+    const key = periodKey(sourcePlan.id, sourceOption.sourcePeriod)
+    delete periodSelections[key]
+    const candidates = targetPriceOptions(sourcePlan.id).filter((targetOption) => {
+      if (targetOption.optionType !== sourceOption.optionType) return false
+      if (sourceOption.optionType !== 'duration') return true
+      return durationSignature(targetOption.durationUnit, targetOption.durationValue) ===
+        durationSignature(sourceOption.durationUnit, sourceOption.durationValue)
+    })
+    if (candidates.length === 1) {
+      periodSelections[key] = candidates[0].id
+    }
+  }
+}
+
+function durationSignature(unit: string, value: number): string {
+  switch (unit.trim().toLocaleLowerCase()) {
+    case 'year':
+      return `month:${value * 12}`
+    case 'month':
+      return `month:${value}`
+    case 'quarter':
+      return `month:${value * 3}`
+    case 'half_year':
+      return `month:${value * 6}`
+    case 'nolimit':
+    case 'no_limit':
+      return 'nolimit'
+    default:
+      return `${unit.trim().toLocaleLowerCase()}:${value}`
+  }
+}
+
+function formatDuration(unit: string, value: number): string {
+  if (unit.toLocaleLowerCase() === 'nolimit') return t('durationNoLimit')
+  return `${value} ${unit}`
+}
+
+function formatPrice(cents: number): string {
+  return (cents / 100).toFixed(2)
 }
 
 // 生成迁移前报告（异步 detect + 进度弹窗）
@@ -650,6 +960,27 @@ async function onImport() {
       targetUsername: target.username,
       targetPassword: target.password,
       modules: mode.value === 'archive' ? [] : selectedModules.value,
+      planMappings: (mappingOptions.value?.sourcePlans ?? [])
+        .filter((sourcePlan) => Boolean(planSelections[sourcePlan.id]))
+        .map((sourcePlan) => ({
+          sourcePlanId: sourcePlan.id,
+          targetSubscribeId: planSelections[sourcePlan.id] as number,
+          periodMappings: sourcePlan.priceOptions
+            .filter((sourceOption) => Boolean(
+              periodSelections[periodKey(sourcePlan.id, sourceOption.sourcePeriod)],
+            ))
+            .map((sourceOption) => ({
+              sourcePeriod: sourceOption.sourcePeriod,
+              targetPriceOptionId: periodSelections[
+                periodKey(sourcePlan.id, sourceOption.sourcePeriod)
+              ] as number,
+            })),
+        })),
+      trialAssignment: {
+        targetSubscribeId: trialAssignment.targetSubscribeId ?? 0,
+        durationUnit: trialAssignment.durationUnit,
+        durationValue: trialAssignment.durationValue,
+      },
     })
     if (resp.ok) {
       message.success(t('msgImportStarted'))
@@ -686,6 +1017,80 @@ function formatDBLabel(detail: { dbType?: string; dbMajor?: string }): string {
   align-items: center;
   gap: 8px;
   font-weight: 600;
+}
+
+.plan-mapping {
+  margin-top: 20px;
+
+  &__header {
+    justify-content: space-between;
+
+    > div {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+  }
+
+  &__content {
+    margin-top: 16px;
+  }
+
+  &__plan {
+    padding: 14px;
+    border: 1px solid #e4e7ed;
+    border-radius: 6px;
+
+    & + & {
+      margin-top: 12px;
+    }
+  }
+
+  &__plan-row,
+  &__period-row,
+  &__trial {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) 24px minmax(300px, 1fr);
+    align-items: center;
+    gap: 12px;
+  }
+
+  &__source,
+  &__period-source {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  &__periods {
+    margin-top: 12px;
+    padding: 12px;
+    background: #fafafa;
+    border-radius: 4px;
+  }
+
+  &__period-row + &__period-row {
+    margin-top: 10px;
+  }
+
+  &__period-source small {
+    color: #909399;
+  }
+
+  &__select {
+    width: 100%;
+  }
+
+  &__trial {
+    grid-template-columns: minmax(260px, 1fr) minmax(280px, 1fr) 150px 130px;
+
+    p {
+      margin: 4px 0 0;
+      color: #606266;
+      font-size: 13px;
+    }
+  }
 }
 
 .migration-mode {

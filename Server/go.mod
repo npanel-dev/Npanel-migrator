@@ -41,4 +41,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/npanel-dev/NPanel-backend => /Users/mac/Project/Go/NP/NPanel-backend
+replace github.com/npanel-dev/NPanel-backend => /Users/mac/Project/Go/NP/NPanelPro/NPanel-backend
