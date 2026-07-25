@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/npanel-dev/NPanel-backend/ent"
+	"github.com/npanel-dev/NPanel-backend/pkg/random"
+	"github.com/npanel-dev/NPanel-backend/pkg/snowflake"
 
 	"npanel-migrator/internal/data/canonical"
 )
@@ -17,6 +19,7 @@ func WriteUsers(ctx context.Context, client *ent.Client, users []*canonical.User
 	errCount := 0
 
 	for _, u := range users {
+		referCode := targetReferCode(u)
 		created, err := client.ProxyUser.Create().
 			SetPassword(u.PasswordHash).
 			SetAlgo(u.PasswordAlgo).
@@ -29,7 +32,7 @@ func WriteUsers(ctx context.Context, client *ent.Client, users []*canonical.User
 			SetIsAdmin(u.IsAdmin).
 			SetValidEmail(u.EmailVerified).
 			SetNillableAvatar(nilIfEmpty(u.Avatar)).
-			SetNillableReferCode(nilIfEmpty(truncateReferCode(u.ReferCode))).
+			SetNillableReferCode(nilIfEmpty(referCode)).
 			SetNillableTelegram(nilIfZero(u.TelegramID)).
 			SetCreatedAt(u.CreatedAt).
 			SetUpdatedAt(u.UpdatedAt).
@@ -85,6 +88,29 @@ func BackfillReferers(ctx context.Context, client *ent.Client, users []*canonica
 		}
 	}
 	return errCount, nil
+}
+
+// targetReferCode 把来源面板的邀请码转换成 NPanel 目标格式。
+//
+// xiaov2board 的 token 是 32 字符 MD5；直接迁移或截断后虽然能写入数据库，
+// 但不符合 NPanel 当前注册流程生成的分段邀请码格式。邀请上下级关系由
+// referer_id 单独回填，因此这里为每个迁移用户生成新邀请码不会破坏邀请关系。
+func targetReferCode(u *canonical.User) string {
+	return targetReferCodeWithGenerator(u, generateNPanelReferCode)
+}
+
+func targetReferCodeWithGenerator(u *canonical.User, generate func(int64) string) string {
+	if strings.EqualFold(strings.TrimSpace(u.SourcePanel), "xiaov2board") {
+		return generate(u.SourceID)
+	}
+	return truncateReferCode(u.ReferCode)
+}
+
+// generateNPanelReferCode 与 NPanel pkg/tool.GenerateReferCode 使用同一实现：
+// Snowflake ID → NPanel 自定义 Base36 → 每 4 字符插入连字符。
+func generateNPanelReferCode(_ int64) string {
+	code := random.EncodeBase36(snowflake.GetID())
+	return random.StrToDashedString(code)
 }
 
 // nilIfEmpty 空字符串返回 nil（用于 Nillable 字段）。
