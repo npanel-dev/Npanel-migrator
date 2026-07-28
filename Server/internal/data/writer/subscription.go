@@ -13,6 +13,7 @@ import (
 	"github.com/npanel-dev/NPanel-backend/ent/proxyusersubscribe"
 
 	"npanel-migrator/internal/data/canonical"
+	"npanel-migrator/internal/data/checkpoint"
 )
 
 // unixZero 永久订阅的标准编码：Unix 0 时间戳（'1970-01-01'）。
@@ -141,6 +142,230 @@ func WriteSubscriptions(
 	}
 
 	return written, errCount, nil
+}
+
+// WriteSubscriptionsBulk 批量写入普通订阅和体验订阅，并将映射与 checkpoint
+// 和目标业务数据放入同一个事务。约束错误使用与用户相同的二分隔离策略。
+func WriteSubscriptionsBulk(
+	ctx context.Context,
+	runtime *Runtime,
+	store *checkpoint.Store,
+	jobID, owner string,
+	subs []*canonical.UserSubscription,
+	sourceMap *canonical.SourceMap,
+	trial TrialAssignment,
+	trialAnchor time.Time,
+	planCache map[int64]*ent.ProxySubscribe,
+	cp *checkpoint.Checkpoint,
+) (int, int, error) {
+	written := 0
+	failed, err := executeBulkWithBisect(
+		subs,
+		func(batch []*canonical.UserSubscription) error {
+			created, err := writeSubscriptionsBulkTx(
+				ctx, runtime, store, jobID, owner, batch, sourceMap,
+				trial, trialAnchor, planCache, cp,
+			)
+			written += created
+			return err
+		},
+		func(sub *canonical.UserSubscription, cause error) error {
+			return recordRejectedEntity(
+				ctx, runtime, store, jobID, owner, "subscriptions", "subscription",
+				sub.SourceID, cause, cp,
+			)
+		},
+	)
+	return written, failed, err
+}
+
+func writeSubscriptionsBulkTx(
+	ctx context.Context,
+	runtime *Runtime,
+	store *checkpoint.Store,
+	jobID, owner string,
+	subs []*canonical.UserSubscription,
+	sourceMap *canonical.SourceMap,
+	trial TrialAssignment,
+	trialAnchor time.Time,
+	planCache map[int64]*ent.ProxySubscribe,
+	cp *checkpoint.Checkpoint,
+) (int, error) {
+	for _, sub := range subs {
+		if sub.Status == 4 {
+			continue
+		}
+		subscribeID := trial.SubscribeID
+		if !sub.NeedsTrial {
+			var ok bool
+			subscribeID, ok = sourceMap.PlanIDs[sub.PlanSourceID]
+			if !ok {
+				return 0, &batchDataError{message: fmt.Sprintf(
+					"源订阅 %d 的套餐 %d 缺少目标映射", sub.SourceID, sub.PlanSourceID,
+				)}
+			}
+		}
+		if _, err := getTargetPlan(ctx, runtime.Client, subscribeID, planCache); err != nil {
+			return 0, &batchDataError{message: err.Error()}
+		}
+	}
+
+	tx, err := runtime.BeginTx(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	trialTokens := make([]string, 0, len(subs))
+	for _, sub := range subs {
+		if sub.Status == 4 || !sub.NeedsTrial {
+			continue
+		}
+		userID, ok := sourceMap.UserIDs[sub.UserSourceID]
+		if !ok {
+			return 0, &batchDataError{message: fmt.Sprintf(
+				"源订阅 %d 缺少目标用户映射", sub.SourceID,
+			)}
+		}
+		trialTokens = append(trialTokens, trialToken(userID))
+	}
+	existingTrials := make(map[string]int64)
+	if len(trialTokens) > 0 {
+		existing, err := tx.Client.ProxyUserSubscribe.Query().
+			Where(proxyusersubscribe.TokenIn(trialTokens...)).
+			All(ctx)
+		if err != nil {
+			return 0, err
+		}
+		for _, item := range existing {
+			if item.Token != nil {
+				existingTrials[*item.Token] = item.ID
+			}
+		}
+	}
+
+	builders := make([]*ent.ProxyUserSubscribeCreate, 0, len(subs))
+	createSources := make([]*canonical.UserSubscription, 0, len(subs))
+	mappings := make([]checkpoint.EntityMapping, 0, len(subs))
+	for _, sub := range subs {
+		if sub.Status == 4 {
+			mappings = append(mappings, checkpoint.EntityMapping{SourceID: sub.SourceID, TargetID: 0})
+			continue
+		}
+		userID, ok := sourceMap.UserIDs[sub.UserSourceID]
+		if !ok {
+			return 0, &batchDataError{message: fmt.Sprintf(
+				"源订阅 %d 缺少目标用户映射", sub.SourceID,
+			)}
+		}
+		if sub.NeedsTrial {
+			token := trialToken(userID)
+			if existingID := existingTrials[token]; existingID > 0 {
+				mappings = append(mappings, checkpoint.EntityMapping{
+					SourceID: sub.SourceID,
+					TargetID: existingID,
+				})
+				continue
+			}
+			plan := planCache[trial.SubscribeID]
+			expireTime := addSubscriptionDuration(trialAnchor, trial.DurationUnit, trial.DurationValue)
+			builders = append(builders, tx.Client.ProxyUserSubscribe.Create().
+				SetUserID(userID).
+				SetOrderID(0).
+				SetSubscribeID(plan.ID).
+				SetIsTrial(true).
+				SetNodeGroupID(targetPlanNodeGroupID(plan)).
+				SetGroupLocked(false).
+				SetStartTime(trialAnchor).
+				SetExpireTime(expireTime).
+				SetTraffic(plan.Traffic).
+				SetDownload(0).
+				SetUpload(0).
+				SetToken(token).
+				SetUUID(uuid.NewString()).
+				SetStatus(1).
+				SetNote("migration: assigned configured trial plan because source subscription was inactive"))
+			createSources = append(createSources, sub)
+			continue
+		}
+
+		subscribeID := sourceMap.PlanIDs[sub.PlanSourceID]
+		plan := planCache[subscribeID]
+		expireTime := unixZero
+		if sub.ExpireTime != nil {
+			expireTime = *sub.ExpireTime
+		}
+		orderID := int64(0)
+		if sub.OrderSourceID != 0 {
+			orderID = sourceMap.OrderIDs[sub.OrderSourceID]
+		}
+		status := mapStatus(sub.Status)
+		builder := tx.Client.ProxyUserSubscribe.Create().
+			SetUserID(userID).
+			SetSubscribeID(subscribeID).
+			SetOrderID(orderID).
+			SetNodeGroupID(targetPlanNodeGroupID(plan)).
+			SetGroupLocked(false).
+			SetStartTime(sub.StartTime).
+			SetExpireTime(expireTime).
+			SetTraffic(sub.TrafficBytes).
+			SetDownload(sub.DownloadBytes).
+			SetUpload(sub.UploadBytes).
+			SetStatus(status)
+		if sub.Token != "" {
+			builder.SetToken(sub.Token)
+		}
+		if sub.UUID != "" {
+			builder.SetUUID(sub.UUID)
+		}
+		if status == 3 {
+			builder.SetFinishedAt(expireTime)
+		}
+		if sub.Status == 5 {
+			builder.SetNote("migrated from source status=5(stopped)")
+		}
+		builders = append(builders, builder)
+		createSources = append(createSources, sub)
+	}
+
+	if len(builders) > 0 {
+		created, err := tx.Client.ProxyUserSubscribe.CreateBulk(builders...).Save(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if len(created) != len(createSources) {
+			return 0, fmt.Errorf(
+				"订阅 Bulk 返回数量异常: got %d want %d", len(created), len(createSources),
+			)
+		}
+		for index, source := range createSources {
+			mappings = append(mappings, checkpoint.EntityMapping{
+				SourceID: source.SourceID,
+				TargetID: created[index].ID,
+			})
+		}
+	}
+	if err := store.PutMappingsTx(ctx, tx.SQL, jobID, "subscription", mappings); err != nil {
+		return 0, err
+	}
+	next := *cp
+	next.LastSourceID = subs[len(subs)-1].SourceID
+	next.Done += int64(len(subs))
+	if err := store.RecordBatchTx(ctx, tx.SQL, checkpoint.BatchRecord{
+		JobID: jobID, Phase: "subscriptions",
+		CursorFrom: subs[0].SourceID, CursorTo: next.LastSourceID,
+		Attempted: len(subs), Succeeded: len(subs), Status: "committed",
+	}); err != nil {
+		return 0, err
+	}
+	if err := store.SaveCheckpointTx(ctx, tx.SQL, next, owner); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	*cp = next
+	return len(builders), nil
 }
 
 func writeTrialSubscription(

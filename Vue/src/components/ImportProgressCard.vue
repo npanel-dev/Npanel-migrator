@@ -6,6 +6,7 @@
           <Loading v-if="status === 'running'" class="is-loading" />
           <CircleCheckFilled v-else-if="status === 'completed'" />
           <CircleCloseFilled v-else-if="status === 'failed'" />
+          <VideoPause v-else-if="status === 'cancelled'" />
           <RemoveFilled v-else />
         </el-icon>
         <span>{{ t('importProgress') }}</span>
@@ -24,13 +25,13 @@
 
     <!-- 统计 -->
     <el-row :gutter="16" class="progress-card__stats">
-      <el-col :span="8">
+      <el-col :xs="12" :sm="6">
         <div class="progress-card__stat">
           <span class="progress-card__stat-label">{{ t('processed') }}</span>
           <span class="progress-card__stat-value">{{ formatNumber(snapshot.done) }} / {{ formatNumber(snapshot.total) }}</span>
         </div>
       </el-col>
-      <el-col :span="8">
+      <el-col :xs="12" :sm="6">
         <div class="progress-card__stat">
           <span class="progress-card__stat-label">{{ t('errors') }}</span>
           <span class="progress-card__stat-value" :class="{ 'is-error': snapshot.errors > 0 }">
@@ -38,19 +39,46 @@
           </span>
         </div>
       </el-col>
-      <el-col :span="8">
+      <el-col :xs="12" :sm="6">
         <div class="progress-card__stat">
           <span class="progress-card__stat-label">{{ t('elapsed') }}</span>
           <span class="progress-card__stat-value">{{ elapsed }}</span>
         </div>
       </el-col>
+      <el-col :xs="12" :sm="6">
+        <div class="progress-card__stat">
+          <span class="progress-card__stat-label">{{ t('speedAndEta') }}</span>
+          <span class="progress-card__stat-value progress-card__stat-value--compact">
+            {{ speed }} · {{ eta }}
+          </span>
+        </div>
+      </el-col>
     </el-row>
+
+    <div v-if="status === 'running' || snapshot.resumable" class="progress-card__actions">
+      <el-button
+        v-if="status === 'running'"
+        type="warning"
+        plain
+        :disabled="snapshot.cancelRequested"
+        @click="emit('cancel')"
+      >
+        {{ snapshot.cancelRequested ? t('cancelPending') : t('safeCancel') }}
+      </el-button>
+      <el-button
+        v-if="snapshot.resumable && status !== 'running'"
+        type="primary"
+        @click="emit('resume')"
+      >
+        {{ t('resumeMigration') }}
+      </el-button>
+    </div>
 
     <!-- 完成消息 -->
     <el-alert
-      v-if="snapshot.message && (status === 'completed' || status === 'failed')"
+      v-if="snapshot.message && ['completed', 'failed', 'cancelled'].includes(status)"
       :title="snapshot.message"
-      :type="status === 'completed' ? 'success' : 'error'"
+      :type="status === 'completed' ? 'success' : status === 'cancelled' ? 'warning' : 'error'"
       :closable="false"
       show-icon
       class="progress-card__message"
@@ -66,10 +94,15 @@ import {
   CircleCloseFilled,
   Loading,
   RemoveFilled,
+  VideoPause,
 } from '@element-plus/icons-vue'
 import type { ProgressSnapshot } from '@/api'
 
 const props = defineProps<{ snapshot: ProgressSnapshot }>()
+const emit = defineEmits<{
+  cancel: []
+  resume: []
+}>()
 const { t } = useI18n()
 
 const status = computed(() => props.snapshot.status)
@@ -87,6 +120,7 @@ const progressStatus = computed<'success' | 'exception' | undefined>(() => {
 const statusTagType = computed<'success' | 'danger' | 'warning' | 'info'>(() => {
   if (status.value === 'completed') return 'success'
   if (status.value === 'failed') return 'danger'
+  if (status.value === 'cancelled') return 'warning'
   if (status.value === 'running') return 'warning'
   return 'info'
 })
@@ -102,6 +136,19 @@ const elapsed = computed(() => {
   const sec = Math.floor((end - start) / 1000)
   if (sec < 60) return `${sec}s`
   return `${Math.floor(sec / 60)}m ${sec % 60}s`
+})
+
+const speed = computed(() => {
+  if (!props.snapshot.ratePerSecond || props.snapshot.ratePerSecond <= 0) return '-'
+  return `${props.snapshot.ratePerSecond.toFixed(1)}/s`
+})
+
+const eta = computed(() => {
+  const seconds = props.snapshot.etaSeconds
+  if (!seconds || seconds <= 0) return t('etaCalculating')
+  if (seconds < 60) return `ETA ${seconds}s`
+  if (seconds < 3600) return `ETA ${Math.ceil(seconds / 60)}m`
+  return `ETA ${Math.floor(seconds / 3600)}h ${Math.ceil((seconds % 3600) / 60)}m`
 })
 
 function formatNumber(n: number): string {
@@ -149,7 +196,17 @@ function formatNumber(n: number): string {
       &.is-error {
         color: #f56c6c;
       }
+
+      &--compact {
+        font-size: 15px;
+      }
     }
+  }
+
+  &__actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 16px;
   }
 
   &__message {

@@ -34,6 +34,25 @@ func (c Config) DSN() string {
 		c.Username, c.Password, c.Host, c.Port, c.Database)
 }
 
+// OpenPool 打开迁移期间复用的源数据库连接池。
+func OpenPool(ctx context.Context, cfg Config) (*sql.DB, error) {
+	pool, err := sql.Open("mysql", cfg.DSN())
+	if err != nil {
+		return nil, err
+	}
+	pool.SetMaxOpenConns(4)
+	pool.SetMaxIdleConns(4)
+	pool.SetConnMaxLifetime(30 * time.Minute)
+	pool.SetConnMaxIdleTime(5 * time.Minute)
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := pool.PingContext(pingCtx); err != nil {
+		_ = pool.Close()
+		return nil, err
+	}
+	return pool, nil
+}
+
 // ServerVersion 查询数据库服务器版本字符串（如 "8.4.6"、"5.7.43"、"10.11.8-MariaDB"）。
 // 用于 test-connection 显示版本号，以及判断兼容性。
 func ServerVersion(ctx context.Context, cfg Config) (string, error) {
@@ -180,12 +199,24 @@ func TableHasIndexPrefix(ctx context.Context, cfg Config, table string, columns 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	rows, err := db.QueryContext(ctx,
+	return TableHasIndexPrefixDB(ctx, db, cfg.Database, table, columns)
+}
+
+// TableHasIndexPrefixDB is the pooled variant used by long-running migrations.
+func TableHasIndexPrefixDB(
+	ctx context.Context,
+	pool *sql.DB,
+	database, table string,
+	columns []string,
+) (bool, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	rows, err := pool.QueryContext(queryCtx,
 		`SELECT INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME
 		   FROM information_schema.STATISTICS
 		  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		  ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
-		cfg.Database, table,
+		database, table,
 	)
 	if err != nil {
 		return false, err
@@ -323,6 +354,26 @@ func QueryScalarWithTimeout(
 	return val.Int64, nil
 }
 
+// QueryScalarDBWithTimeout 在已经打开的连接池上执行标量查询。
+func QueryScalarDBWithTimeout(
+	ctx context.Context,
+	pool *sql.DB,
+	timeout time.Duration,
+	query string,
+	args ...any,
+) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var val sql.NullInt64
+	if err := pool.QueryRowContext(ctx, query, args...).Scan(&val); err != nil {
+		return 0, err
+	}
+	if !val.Valid {
+		return 0, nil
+	}
+	return val.Int64, nil
+}
+
 // QueryRows 执行返回多行的查询，通过 scanFn 回调处理每一行，确保连接正确释放。
 // 用于 dry-run 阶段查询冲突明细（如重复邮箱列表）。
 // scanFn 返回 error 时中止扫描（非 nil 会向上传递，io.EOF 视为正常结束）。
@@ -354,6 +405,30 @@ func QueryRowsWithTimeout(
 	}
 	defer rows.Close()
 
+	for rows.Next() {
+		if err := scanFn(rows); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// QueryRowsDBWithTimeout 在已经打开的连接池上流式查询，避免每批重新握手。
+func QueryRowsDBWithTimeout(
+	ctx context.Context,
+	pool *sql.DB,
+	timeout time.Duration,
+	query string,
+	scanFn func(rows *sql.Rows) error,
+	args ...any,
+) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	rows, err := pool.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
 	for rows.Next() {
 		if err := scanFn(rows); err != nil {
 			return err

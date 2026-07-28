@@ -3,13 +3,17 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/npanel-dev/NPanel-backend/ent"
 
 	"npanel-migrator/internal/adapter/xiaov2board"
 	"npanel-migrator/internal/data/canonical"
+	"npanel-migrator/internal/data/checkpoint"
 	"npanel-migrator/internal/data/db"
 	"npanel-migrator/internal/data/detector"
 	"npanel-migrator/internal/data/progress"
@@ -41,6 +45,8 @@ type ImportRequest struct {
 	PlanMappings []PlanMapping `json:"planMappings"`
 	// TrialAssignment 用于无有效订阅（无套餐、已过期、流量为 0）的非封禁用户。
 	TrialAssignment TrialAssignment `json:"trialAssignment"`
+	// ResumeJobID 非空时恢复由新版迁移器创建的同一任务。
+	ResumeJobID string `json:"resumeJobId,omitempty"`
 }
 
 type PlanMapping struct {
@@ -95,10 +101,38 @@ func hasModule(modules []string, m string) bool {
 type ImportResponse struct {
 	OK      bool   `json:"ok"`
 	Message string `json:"message"`
+	JobID   string `json:"jobId,omitempty"`
+}
+
+type MigrationJobSummary struct {
+	ID              string     `json:"id"`
+	Status          string     `json:"status"`
+	EffectiveStatus string     `json:"effectiveStatus"`
+	Phase           string     `json:"phase"`
+	Total           int64      `json:"total"`
+	Done            int64      `json:"done"`
+	Errors          int64      `json:"errors"`
+	StartedAt       time.Time  `json:"startedAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
+	FinishedAt      *time.Time `json:"finishedAt,omitempty"`
+	LastError       string     `json:"lastError,omitempty"`
+	Resumable       bool       `json:"resumable"`
+}
+
+type MigrationJobsResponse struct {
+	OK   bool                  `json:"ok"`
+	Jobs []MigrationJobSummary `json:"jobs"`
 }
 
 // 全局进度追踪器（单实例，同一时刻只允许一个 import 任务）。
 var globalTracker = progress.NewTracker()
+
+var activeImport = struct {
+	sync.Mutex
+	jobID           string
+	store           *checkpoint.Store
+	cancelRequested bool
+}{}
 
 // GetProgress 获取当前导入进度（供 GET /api/progress 调用）。
 func (s *MigrationService) GetProgress() *progress.Snapshot {
@@ -109,6 +143,13 @@ func (s *MigrationService) GetProgress() *progress.Snapshot {
 // StartImport 异步启动导入任务。
 // 返回 (已启动?, 原因)。若已有任务运行中则拒绝。
 func (s *MigrationService) StartImport(req *ImportRequest) (*ImportResponse, error) {
+	if strings.TrimSpace(req.ResumeJobID) != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := hydrateResumeOptions(ctx, req); err != nil {
+			return &ImportResponse{OK: false, Message: "读取恢复任务失败: " + err.Error()}, nil
+		}
+	}
 	if err := validateModuleDependencies(req.Modules); err != nil {
 		return &ImportResponse{OK: false, Message: err.Error()}, nil
 	}
@@ -128,8 +169,12 @@ func (s *MigrationService) StartImport(req *ImportRequest) (*ImportResponse, err
 			}, nil
 		}
 	}
+	jobID := strings.TrimSpace(req.ResumeJobID)
+	if jobID == "" {
+		jobID = uuid.NewString()
+	}
 	// 加锁确保只有一个 import 任务。
-	if !globalTracker.Start() {
+	if !globalTracker.StartJob(jobID) {
 		return &ImportResponse{
 			OK:      false,
 			Message: "已有迁移任务正在运行，请等待完成",
@@ -140,13 +185,102 @@ func (s *MigrationService) StartImport(req *ImportRequest) (*ImportResponse, err
 	if batchSize <= 0 {
 		batchSize = 500
 	}
+	if batchSize > 1000 {
+		batchSize = 1000
+	}
+
+	host, _ := os.Hostname()
+	owner := fmt.Sprintf("%s-%s", host, uuid.NewString())
+	activeImport.Lock()
+	activeImport.jobID = jobID
+	activeImport.store = nil
+	activeImport.cancelRequested = false
+	activeImport.Unlock()
 
 	// 后台 goroutine 执行导入。
-	go s.runImport(req, batchSize)
+	go s.runImportFast(req, batchSize, jobID, owner)
 
 	return &ImportResponse{
 		OK:      true,
 		Message: "迁移任务已启动",
+		JobID:   jobID,
+	}, nil
+}
+
+// ListMigrationJobs returns resumable history for the exact source and target
+// databases. Passwords are used only to open the connections and are never
+// included in the task summary.
+func (s *MigrationService) ListMigrationJobs(
+	ctx context.Context,
+	req *ImportRequest,
+) (*MigrationJobsResponse, error) {
+	sourceCfg := db.Config{
+		Host: req.SourceHost, Port: req.SourcePort, Database: req.SourceDatabase,
+		Username: req.SourceUsername, Password: req.SourcePassword,
+	}
+	panel := strings.TrimSpace(req.SourcePanel)
+	if panel == "" || panel == "auto" {
+		result, err := detector.Detect(ctx, sourceCfg, panel)
+		if err != nil {
+			return nil, fmt.Errorf("识别源面板失败: %w", err)
+		}
+		panel = string(result.Panel)
+	}
+	targetCfg := writer.NPanelConfig{
+		Host: req.TargetHost, Port: req.TargetPort, Database: req.TargetDatabase,
+		Username: req.TargetUsername, Password: req.TargetPassword,
+	}
+	runtime, err := writer.OpenRuntime(ctx, targetCfg)
+	if err != nil {
+		return nil, fmt.Errorf("连接目标库失败: %w", err)
+	}
+	defer runtime.Close()
+	store := checkpoint.New(runtime.DB)
+	if err := store.EnsureSchema(ctx); err != nil {
+		return nil, err
+	}
+	jobs, err := store.ListJobs(
+		ctx,
+		configFingerprint(panel, sourceCfg.Host, sourceCfg.Port, sourceCfg.Database),
+		configFingerprint("npanel", targetCfg.Host, targetCfg.Port, targetCfg.Database),
+		20,
+	)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]MigrationJobSummary, 0, len(jobs))
+	for _, job := range jobs {
+		summaries = append(summaries, MigrationJobSummary{
+			ID: job.ID, Status: job.Status, EffectiveStatus: job.EffectiveStatus,
+			Phase: job.Phase, Total: job.Total, Done: job.Done, Errors: job.Errors,
+			StartedAt: job.StartedAt, UpdatedAt: job.UpdatedAt,
+			FinishedAt: job.FinishedAt, LastError: job.LastError,
+			Resumable: job.Resumable,
+		})
+	}
+	return &MigrationJobsResponse{OK: true, Jobs: summaries}, nil
+}
+
+type CancelImportRequest struct {
+	JobID string `json:"jobId"`
+}
+
+func (s *MigrationService) CancelImport(ctx context.Context, req *CancelImportRequest) (*ImportResponse, error) {
+	activeImport.Lock()
+	defer activeImport.Unlock()
+	if activeImport.jobID == "" || (req.JobID != "" && req.JobID != activeImport.jobID) {
+		return &ImportResponse{OK: false, Message: "没有匹配的运行中迁移任务"}, nil
+	}
+	activeImport.cancelRequested = true
+	globalTracker.SetCancelRequested(true)
+	if activeImport.store != nil {
+		if err := activeImport.store.RequestCancel(ctx, activeImport.jobID); err != nil {
+			return nil, err
+		}
+	}
+	return &ImportResponse{
+		OK: true, JobID: activeImport.jobID,
+		Message: "已请求安全取消，将在当前批次提交后停止",
 	}, nil
 }
 

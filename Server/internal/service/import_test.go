@@ -30,6 +30,68 @@ func TestValidateModuleDependencies(t *testing.T) {
 	}
 }
 
+func TestStableOptionsIsOrderIndependentAndExcludesCredentials(t *testing.T) {
+	first := &ImportRequest{
+		SourcePassword: "source-secret",
+		TargetPassword: "target-secret",
+		Modules:        []string{ModuleOrders, ModuleUsers},
+		PlanMappings: []PlanMapping{
+			{
+				SourcePlanID: 2, TargetSubscribeID: 20,
+				PeriodMappings: []PeriodMapping{
+					{SourcePeriod: "year_price", TargetPriceOptionID: 202},
+					{SourcePeriod: "month_price", TargetPriceOptionID: 201},
+				},
+			},
+			{SourcePlanID: 1, TargetSubscribeID: 10},
+		},
+		TrialAssignment: TrialAssignment{
+			TargetSubscribeID: 99, DurationUnit: "Day", DurationValue: 7,
+		},
+	}
+	second := &ImportRequest{
+		SourcePassword: "different-source-secret",
+		TargetPassword: "different-target-secret",
+		Modules:        []string{ModuleUsers, ModuleOrders},
+		PlanMappings: []PlanMapping{
+			{SourcePlanID: 1, TargetSubscribeID: 10},
+			{
+				SourcePlanID: 2, TargetSubscribeID: 20,
+				PeriodMappings: []PeriodMapping{
+					{SourcePeriod: "month_price", TargetPriceOptionID: 201},
+					{SourcePeriod: "year_price", TargetPriceOptionID: 202},
+				},
+			},
+		},
+		TrialAssignment: first.TrialAssignment,
+	}
+	firstJSON, firstHash, err := stableOptions(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, secondHash, err := stableOptions(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstHash != secondHash || firstJSON != secondJSON {
+		t.Fatalf("stable options differ:\n%s\n%s", firstJSON, secondJSON)
+	}
+	if strings.Contains(firstJSON, "secret") {
+		t.Fatalf("stored options contain credentials: %s", firstJSON)
+	}
+}
+
+func TestConfigFingerprintNormalization(t *testing.T) {
+	first := configFingerprint("XiaoV2Board", "DB.EXAMPLE.COM ", 3306, "V2BOARD")
+	second := configFingerprint("xiaov2board", "db.example.com", 3306, "v2board")
+	if first != second {
+		t.Fatalf("normalized fingerprints differ: %s != %s", first, second)
+	}
+	if first == configFingerprint("xiaov2board", "db.example.com", 3306, "other") {
+		t.Fatal("different database produced the same fingerprint")
+	}
+}
+
 func TestDryRunBlockingError(t *testing.T) {
 	t.Run("allows successful report", func(t *testing.T) {
 		report := &xiaov2board.DryRunReport{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"npanel-migrator/internal/data/canonical"
@@ -13,13 +14,35 @@ import (
 // ExtractOrders 从 v2_order 读取历史订单，转换为 canonical.Order。
 // 订单状态映射见方案 6.8。
 func ExtractOrders(ctx context.Context, cfg db.Config, batchSize int, onBatch func([]*canonical.Order) error) error {
-	offset := 0
+	pool, err := db.OpenPool(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	highWater, err := db.QueryScalarDBWithTimeout(ctx, pool, 10*time.Second, "SELECT COALESCE(MAX(id), 0) FROM v2_order")
+	if err != nil {
+		return err
+	}
+	return ExtractOrdersKeyset(ctx, pool, batchSize, 0, highWater, onBatch)
+}
+
+func ExtractOrdersKeyset(
+	ctx context.Context,
+	pool *sql.DB,
+	batchSize int,
+	afterID, highWater int64,
+	onBatch func([]*canonical.Order) error,
+) error {
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	lastID := afterID
 	for {
 		var batch []*canonical.Order
-		err := db.QueryRows(ctx, cfg,
+		err := db.QueryRowsDBWithTimeout(ctx, pool, 30*time.Second,
 			"SELECT id, user_id, plan_id, type, period, trade_no, total_amount, "+
 				"status, paid_at, created_at, updated_at "+
-				"FROM v2_order ORDER BY id LIMIT ? OFFSET ?",
+				"FROM v2_order WHERE id > ? AND id <= ? ORDER BY id LIMIT ?",
 			func(rows *sql.Rows) error {
 				o, err := scanOrder(rows)
 				if err != nil {
@@ -28,10 +51,10 @@ func ExtractOrders(ctx context.Context, cfg db.Config, batchSize int, onBatch fu
 				batch = append(batch, o)
 				return nil
 			},
-			batchSize, offset,
+			lastID, highWater, batchSize,
 		)
 		if err != nil {
-			return fmt.Errorf("读取 v2_order 失败 (offset %d): %w", offset, err)
+			return fmt.Errorf("读取 v2_order 失败 (after id %d): %w", lastID, err)
 		}
 		if len(batch) == 0 {
 			return nil
@@ -42,7 +65,7 @@ func ExtractOrders(ctx context.Context, cfg db.Config, batchSize int, onBatch fu
 		if len(batch) < batchSize {
 			return nil
 		}
-		offset += batchSize
+		lastID = batch[len(batch)-1].SourceID
 	}
 }
 
@@ -83,21 +106,28 @@ func scanOrder(rows *sql.Rows) (*canonical.Order, error) {
 	}
 
 	return &canonical.Order{
-		SourceID:      id,
-		UserSourceID:  userID.Int64,
-		PlanSourceID:  planID.Int64,
-		OrderNo:       tradeNo.String,
-		Type:          npanelType,
-		Quantity:      1,
-		PriceCents:    totalAmount.Int64,
-		AmountCents:   totalAmount.Int64,
-		Status:        npanelStatus,
-		Period:        period.String,
-		TradeNo:       tradeNo.String,
-		PaidAt:        paidTime,
-		CreatedAt:     unixToTime(createdAt.Int64),
-		UpdatedAt:     unixToTime(updatedAt.Int64),
+		SourceID:     id,
+		UserSourceID: userID.Int64,
+		PlanSourceID: planID.Int64,
+		OrderNo:      sourceOrderNo(id, tradeNo.String),
+		Type:         npanelType,
+		Quantity:     1,
+		PriceCents:   totalAmount.Int64,
+		AmountCents:  totalAmount.Int64,
+		Status:       npanelStatus,
+		Period:       period.String,
+		TradeNo:      tradeNo.String,
+		PaidAt:       paidTime,
+		CreatedAt:    unixToTime(createdAt.Int64),
+		UpdatedAt:    unixToTime(updatedAt.Int64),
 	}, nil
+}
+
+func sourceOrderNo(sourceID int64, tradeNo string) string {
+	if value := strings.TrimSpace(tradeNo); value != "" {
+		return value
+	}
+	return fmt.Sprintf("V2B-MIG-%d", sourceID)
 }
 
 // mapOrderType v2board type → NPanel type（方案 6.8）。

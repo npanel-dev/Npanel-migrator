@@ -402,6 +402,8 @@
       v-if="progressSnapshot && progressSnapshot.status !== 'idle'"
       :snapshot="progressSnapshot"
       class="report-wrapper"
+      @cancel="onCancelImport"
+      @resume="onResumeImport"
     />
 
     <!-- 任务进度弹窗（detect/dry-run） -->
@@ -427,9 +429,11 @@ import TaskProgressDialog from '@/components/TaskProgressDialog.vue'
 import message from '@/utils/message'
 import {
   apiErrorMessage,
+  cancelImport,
   getProgress,
   getPlanMappingOptions,
   getTaskProgress,
+  listMigrationJobs,
   startDetectAsync,
   startDryRunAsync,
   startImport,
@@ -437,6 +441,8 @@ import {
   type DatabaseConfig,
   type DetectData,
   type DryRunReport,
+  type ImportRequest,
+  type MigrationJobSummary,
   type ProgressSnapshot,
   type PlanMappingOptionsResponse,
   type SourcePlanMappingOption,
@@ -561,6 +567,8 @@ const dryRunReport = ref<DryRunReport | null>(null)
 // import 阶段状态
 const importing = ref(false)
 const progressSnapshot = ref<ProgressSnapshot | null>(null)
+const resumableJob = ref<MigrationJobSummary | null>(null)
+const activeJobId = ref(localStorage.getItem('npanel-migrator-job-id') ?? '')
 let progressTimer: ReturnType<typeof setInterval> | null = null
 
 // 任务进度弹窗（detect/dry-run 共用）
@@ -625,6 +633,10 @@ onMounted(async () => {
   try {
     const snap = await getProgress()
     progressSnapshot.value = snap
+    if (snap.jobId) {
+      activeJobId.value = snap.jobId
+      localStorage.setItem('npanel-migrator-job-id', snap.jobId)
+    }
     if (snap.status === 'running') {
       startProgressPolling()
     }
@@ -645,11 +657,15 @@ function startProgressPolling() {
     try {
       const snap = await getProgress()
       progressSnapshot.value = snap
-      if (snap.status === 'completed' || snap.status === 'failed') {
+      if (['completed', 'failed', 'cancelled'].includes(snap.status)) {
         stopProgressPolling()
         importing.value = false
         if (snap.status === 'completed') {
+          resumableJob.value = null
+          localStorage.removeItem('npanel-migrator-job-id')
           message.success(snap.message)
+        } else if (snap.status === 'cancelled') {
+          message.warning(snap.message || t('msgImportCancelled'))
         } else {
           message.error(snap.message)
         }
@@ -693,7 +709,7 @@ async function onTestSource() {
         }
       }
       if (targetConnected.value) {
-        await onLoadPlanMappings()
+        await Promise.all([onLoadPlanMappings(), loadResumableJobs()])
       }
     } else {
       message.error(sourceResult.value.message || t('msgSourceConnectFailed'))
@@ -721,7 +737,7 @@ async function onTestTarget() {
       if (targetResult.value.detail?.isNPanelTarget) {
         message.success(targetResult.value.message || t('msgTargetConnected'))
         if (sourceConnected.value) {
-          await onLoadPlanMappings()
+          await Promise.all([onLoadPlanMappings(), loadResumableJobs()])
         }
       } else {
         message.warning(targetResult.value.message || t('msgTargetNotNPanel'))
@@ -734,6 +750,57 @@ async function onTestTarget() {
     message.error(t('msgTargetTestFailed', { err: String(e) }))
   } finally {
     targetTesting.value = false
+  }
+}
+
+function migrationConnectionRequest() {
+  return {
+    sourceHost: source.host,
+    sourcePort: source.port,
+    sourceDatabase: source.database,
+    sourceUsername: source.username,
+    sourcePassword: source.password,
+    sourcePanel: source.panel === 'auto'
+      ? sourceResult.value?.detail?.panel
+      : source.panel,
+    targetHost: target.host,
+    targetPort: target.port,
+    targetDatabase: target.database,
+    targetUsername: target.username,
+    targetPassword: target.password,
+  }
+}
+
+async function loadResumableJobs() {
+  if (!sourceConnected.value || !targetConnected.value || importRunning.value) return
+  try {
+    const response = await listMigrationJobs(migrationConnectionRequest())
+    const job = response.jobs.find((candidate) => candidate.resumable) ?? null
+    resumableJob.value = job
+    if (!job) return
+
+    activeJobId.value = job.id
+    localStorage.setItem('npanel-migrator-job-id', job.id)
+    progressSnapshot.value = {
+      jobId: job.id,
+      status: job.status === 'cancelled' ? 'cancelled' : 'failed',
+      phase: job.phase,
+      phaseLabel: job.phase,
+      total: job.total,
+      done: job.done,
+      errors: job.errors,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+      message: job.lastError || t('msgResumeAvailable'),
+      ratePerSecond: 0,
+      etaSeconds: 0,
+      resumable: true,
+      cancelRequested: false,
+    }
+    message.info(t('msgResumeAvailable'))
+  } catch (e) {
+    // 任务查询不影响连接和全新迁移；仅在控制台留下诊断信息。
+    console.warn('load resumable migration jobs failed', e)
   }
 }
 
@@ -947,6 +1014,59 @@ function onTaskDialogClose() {
   stopTaskPolling()
 }
 
+function buildImportRequest(resumeJobId?: string): ImportRequest {
+  return {
+    ...migrationConnectionRequest(),
+    modules: mode.value === 'archive' ? [] : selectedModules.value,
+    planMappings: (mappingOptions.value?.sourcePlans ?? [])
+      .filter((sourcePlan) => Boolean(planSelections[sourcePlan.id]))
+      .map((sourcePlan) => ({
+        sourcePlanId: sourcePlan.id,
+        targetSubscribeId: planSelections[sourcePlan.id] as number,
+        periodMappings: sourcePlan.priceOptions
+          .filter((sourceOption) => Boolean(
+            periodSelections[periodKey(sourcePlan.id, sourceOption.sourcePeriod)],
+          ))
+          .map((sourceOption) => ({
+            sourcePeriod: sourceOption.sourcePeriod,
+            targetPriceOptionId: periodSelections[
+              periodKey(sourcePlan.id, sourceOption.sourcePeriod)
+            ] as number,
+          })),
+      })),
+    trialAssignment: {
+      targetSubscribeId: trialAssignment.targetSubscribeId ?? 0,
+      durationUnit: trialAssignment.durationUnit,
+      durationValue: trialAssignment.durationValue,
+    },
+    resumeJobId,
+  }
+}
+
+async function executeImport(resumeJobId?: string) {
+  importing.value = true
+  try {
+    const resp = await startImport(buildImportRequest(resumeJobId))
+    if (resp.ok) {
+      activeJobId.value = resp.jobId ?? resumeJobId ?? ''
+      if (activeJobId.value) {
+        localStorage.setItem('npanel-migrator-job-id', activeJobId.value)
+      }
+      resumableJob.value = null
+      message.success(t('msgImportStarted'))
+      const snap = await getProgress()
+      progressSnapshot.value = snap
+      startProgressPolling()
+    } else {
+      message.error(resp.message || t('msgImportBusy'))
+      importing.value = false
+    }
+  } catch (e) {
+    message.error(t('msgImportFailed') + ': ' + apiErrorMessage(e))
+    importing.value = false
+  }
+}
+
 // 启动正式迁移（带二次确认）
 async function onImport() {
   // 二次确认（写入操作不可撤销）。
@@ -960,53 +1080,38 @@ async function onImport() {
     return // 用户取消
   }
 
-  importing.value = true
+  await executeImport()
+}
+
+async function onResumeImport() {
+  const jobId = resumableJob.value?.id || progressSnapshot.value?.jobId || activeJobId.value
+  if (!jobId) return
   try {
-    const resp = await startImport({
-      sourceHost: source.host,
-      sourcePort: source.port,
-      sourceDatabase: source.database,
-      sourceUsername: source.username,
-      sourcePassword: source.password,
-      sourcePanel: source.panel === 'auto' ? undefined : source.panel,
-      targetHost: target.host,
-      targetPort: target.port,
-      targetDatabase: target.database,
-      targetUsername: target.username,
-      targetPassword: target.password,
-      modules: mode.value === 'archive' ? [] : selectedModules.value,
-      planMappings: (mappingOptions.value?.sourcePlans ?? [])
-        .filter((sourcePlan) => Boolean(planSelections[sourcePlan.id]))
-        .map((sourcePlan) => ({
-          sourcePlanId: sourcePlan.id,
-          targetSubscribeId: planSelections[sourcePlan.id] as number,
-          periodMappings: sourcePlan.priceOptions
-            .filter((sourceOption) => Boolean(
-              periodSelections[periodKey(sourcePlan.id, sourceOption.sourcePeriod)],
-            ))
-            .map((sourceOption) => ({
-              sourcePeriod: sourceOption.sourcePeriod,
-              targetPriceOptionId: periodSelections[
-                periodKey(sourcePlan.id, sourceOption.sourcePeriod)
-              ] as number,
-            })),
-        })),
-      trialAssignment: {
-        targetSubscribeId: trialAssignment.targetSubscribeId ?? 0,
-        durationUnit: trialAssignment.durationUnit,
-        durationValue: trialAssignment.durationValue,
-      },
+    await ElMessageBox.confirm(t('confirmResumeMigration'), t('resumeMigration'), {
+      confirmButtonText: t('resumeMigration'),
+      cancelButtonText: t('cancel'),
+      type: 'warning',
     })
-    if (resp.ok) {
-      message.success(t('msgImportStarted'))
-      startProgressPolling()
-    } else {
-      message.error(resp.message || t('msgImportBusy'))
-      importing.value = false
+  } catch {
+    return
+  }
+  await executeImport(jobId)
+}
+
+async function onCancelImport() {
+  const jobId = progressSnapshot.value?.jobId || activeJobId.value
+  try {
+    const response = await cancelImport(jobId)
+    if (!response.ok) {
+      message.error(response.message)
+      return
     }
+    if (progressSnapshot.value) {
+      progressSnapshot.value.cancelRequested = true
+    }
+    message.warning(response.message || t('msgCancelRequested'))
   } catch (e) {
-    message.error(t('msgImportFailed') + ': ' + String(e))
-    importing.value = false
+    message.error(apiErrorMessage(e))
   }
 }
 

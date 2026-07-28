@@ -159,6 +159,40 @@ func registerAPIRoutes(srv *khttp.Server, svc *service.MigrationService) {
 		return ctx.JSON(200, resp)
 	})
 
+	// POST /api/import/jobs —— 查询当前源库/目标库对应的可恢复任务。
+	route.POST("/import/jobs", func(ctx khttp.Context) error {
+		body, err := io.ReadAll(ctx.Request().Body)
+		if err != nil {
+			return writeError(ctx, 400, "读取请求体失败: "+err.Error())
+		}
+		var req service.ImportRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return writeError(ctx, 400, "解析请求体失败: "+err.Error())
+		}
+		resp, err := svc.ListMigrationJobs(ctx, &req)
+		if err != nil {
+			return writeError(ctx, 500, err.Error())
+		}
+		return ctx.JSON(200, resp)
+	})
+
+	// POST /api/import/cancel —— 当前批次安全提交后取消任务。
+	route.POST("/import/cancel", func(ctx khttp.Context) error {
+		body, err := io.ReadAll(ctx.Request().Body)
+		if err != nil {
+			return writeError(ctx, 400, "读取请求体失败: "+err.Error())
+		}
+		var req service.CancelImportRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return writeError(ctx, 400, "解析请求体失败: "+err.Error())
+		}
+		resp, err := svc.CancelImport(ctx, &req)
+		if err != nil {
+			return writeError(ctx, 500, err.Error())
+		}
+		return ctx.JSON(200, resp)
+	})
+
 	// GET /api/progress —— 查询迁移进度（轮询）
 	route.GET("/progress", func(ctx khttp.Context) error {
 		snap := svc.GetProgress()
