@@ -2,6 +2,8 @@ package writer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/npanel-dev/NPanel-backend/ent"
@@ -9,7 +11,21 @@ import (
 	"github.com/npanel-dev/NPanel-backend/pkg/snowflake"
 
 	"npanel-migrator/internal/data/canonical"
+	"npanel-migrator/internal/data/checkpoint"
 )
+
+type batchDataError struct {
+	message string
+}
+
+func (e *batchDataError) Error() string { return e.message }
+
+func isSplittableBulkError(err error) bool {
+	var dataErr *batchDataError
+	return ent.IsConstraintError(err) ||
+		ent.IsValidationError(err) ||
+		errors.As(err, &dataErr)
+}
 
 // WriteUsers 批量写入用户（user + user_auth_methods）。
 // 返回 sourceUserID → npanelUserID 的映射，供后续实体引用。
@@ -19,25 +35,7 @@ func WriteUsers(ctx context.Context, client *ent.Client, users []*canonical.User
 	errCount := 0
 
 	for _, u := range users {
-		referCode := targetReferCode(u)
-		created, err := client.ProxyUser.Create().
-			SetPassword(u.PasswordHash).
-			SetAlgo(u.PasswordAlgo).
-			SetSalt(u.PasswordSalt).
-			SetSourcePanel(sourcePanelOrUnknown(u.SourcePanel)).
-			SetNillableBalance(&u.BalanceCents).
-			SetNillableCommission(&u.CommissionCents).
-			SetNillableGiftAmount(&u.GiftCents).
-			SetEnable(u.Enabled).
-			SetIsAdmin(u.IsAdmin).
-			SetValidEmail(u.EmailVerified).
-			SetNillableAvatar(nilIfEmpty(u.Avatar)).
-			SetNillableReferCode(nilIfEmpty(referCode)).
-			SetNillableTelegram(nilIfZero(u.TelegramID)).
-			SetCreatedAt(u.CreatedAt).
-			SetUpdatedAt(u.UpdatedAt).
-			SetIsDel(1). // 语义反直觉：1=正常（方案 2 章）
-			Save(ctx)
+		created, err := newUserBuilder(client, u).Save(ctx)
 		if err != nil {
 			errCount++
 			// 唯一冲突等错误跳过，继续下一条。
@@ -62,6 +60,263 @@ func WriteUsers(ctx context.Context, client *ent.Client, users []*canonical.User
 	}
 
 	return idMap, errCount, nil
+}
+
+func newUserBuilder(client *ent.Client, u *canonical.User) *ent.ProxyUserCreate {
+	referCode := targetReferCode(u)
+	return client.ProxyUser.Create().
+		SetPassword(u.PasswordHash).
+		SetAlgo(u.PasswordAlgo).
+		SetSalt(u.PasswordSalt).
+		SetSourcePanel(sourcePanelOrUnknown(u.SourcePanel)).
+		SetNillableBalance(&u.BalanceCents).
+		SetNillableCommission(&u.CommissionCents).
+		SetNillableGiftAmount(&u.GiftCents).
+		SetEnable(u.Enabled).
+		SetIsAdmin(u.IsAdmin).
+		SetValidEmail(u.EmailVerified).
+		SetNillableAvatar(nilIfEmpty(u.Avatar)).
+		SetNillableReferCode(nilIfEmpty(referCode)).
+		SetNillableTelegram(nilIfZero(u.TelegramID)).
+		SetCreatedAt(u.CreatedAt).
+		SetUpdatedAt(u.UpdatedAt).
+		SetIsDel(1)
+}
+
+// WriteUsersBulk 用单个目标库事务批量写入用户、邮箱认证、映射和 checkpoint。
+// 约束/校验错误会递归二分；连接或事务错误会立即返回，避免把基础设施故障误记为坏数据。
+func WriteUsersBulk(
+	ctx context.Context,
+	runtime *Runtime,
+	store *checkpoint.Store,
+	jobID, owner string,
+	users []*canonical.User,
+	cp *checkpoint.Checkpoint,
+) (map[int64]int64, int, error) {
+	result := make(map[int64]int64, len(users))
+	failed, err := executeBulkWithBisect(
+		users,
+		func(batch []*canonical.User) error {
+			mappings, err := writeUsersBulkTx(
+				ctx, runtime, store, jobID, owner, batch, cp,
+			)
+			if err != nil {
+				return err
+			}
+			for _, mapping := range mappings {
+				result[mapping.SourceID] = mapping.TargetID
+			}
+			return nil
+		},
+		func(user *canonical.User, cause error) error {
+			return recordRejectedEntity(
+				ctx, runtime, store, jobID, owner, "users", "user",
+				user.SourceID, cause, cp,
+			)
+		},
+	)
+	return result, failed, err
+}
+
+func writeUsersBulkTx(
+	ctx context.Context,
+	runtime *Runtime,
+	store *checkpoint.Store,
+	jobID, owner string,
+	users []*canonical.User,
+	cp *checkpoint.Checkpoint,
+) ([]checkpoint.EntityMapping, error) {
+	tx, err := runtime.BeginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	builders := make([]*ent.ProxyUserCreate, 0, len(users))
+	for _, user := range users {
+		builders = append(builders, newUserBuilder(tx.Client, user))
+	}
+	created, err := tx.Client.ProxyUser.CreateBulk(builders...).Save(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(created) != len(users) {
+		return nil, fmt.Errorf("用户 Bulk 返回数量异常: got %d want %d", len(created), len(users))
+	}
+
+	authBuilders := make([]*ent.ProxyUserAuthMethodCreate, 0, len(users))
+	mappings := make([]checkpoint.EntityMapping, 0, len(users))
+	for index, user := range users {
+		mappings = append(mappings, checkpoint.EntityMapping{
+			SourceID: user.SourceID,
+			TargetID: created[index].ID,
+		})
+		email := strings.ToLower(strings.TrimSpace(user.Email))
+		if email == "" {
+			continue
+		}
+		authBuilders = append(authBuilders, tx.Client.ProxyUserAuthMethod.Create().
+			SetUserID(created[index].ID).
+			SetAuthType("email").
+			SetAuthIdentifier(email).
+			SetVerified(user.EmailVerified))
+	}
+	if len(authBuilders) > 0 {
+		if _, err := tx.Client.ProxyUserAuthMethod.CreateBulk(authBuilders...).Save(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if err := store.PutMappingsTx(ctx, tx.SQL, jobID, "user", mappings); err != nil {
+		return nil, err
+	}
+
+	next := *cp
+	next.LastSourceID = users[len(users)-1].SourceID
+	next.Done += int64(len(users))
+	if err := store.RecordBatchTx(ctx, tx.SQL, checkpoint.BatchRecord{
+		JobID: jobID, Phase: "users",
+		CursorFrom: users[0].SourceID, CursorTo: next.LastSourceID,
+		Attempted: len(users), Succeeded: len(users), Status: "committed",
+	}); err != nil {
+		return nil, err
+	}
+	if err := store.SaveCheckpointTx(ctx, tx.SQL, next, owner); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	*cp = next
+	return mappings, nil
+}
+
+func recordRejectedEntity(
+	ctx context.Context,
+	runtime *Runtime,
+	store *checkpoint.Store,
+	jobID, owner, phase, entityType string,
+	sourceID int64,
+	cause error,
+	cp *checkpoint.Checkpoint,
+) error {
+	tx, err := runtime.BeginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := store.RecordErrorTx(ctx, tx.SQL, jobID, phase, entityType, sourceID, cause); err != nil {
+		return err
+	}
+	next := *cp
+	next.LastSourceID = sourceID
+	next.Done++
+	next.Errors++
+	if err := store.RecordBatchTx(ctx, tx.SQL, checkpoint.BatchRecord{
+		JobID: jobID, Phase: phase,
+		CursorFrom: sourceID, CursorTo: sourceID,
+		Attempted: 1, Failed: 1, Status: "rejected",
+	}); err != nil {
+		return err
+	}
+	if err := store.SaveCheckpointTx(ctx, tx.SQL, next, owner); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	*cp = next
+	return nil
+}
+
+// BackfillReferersBulk 使用单条参数化 CASE UPDATE 回填一个源用户批次的邀请关系。
+func BackfillReferersBulk(
+	ctx context.Context,
+	runtime *Runtime,
+	store *checkpoint.Store,
+	jobID, owner string,
+	users []*canonical.User,
+	userMap map[int64]int64,
+	cp *checkpoint.Checkpoint,
+) (int, error) {
+	if len(users) == 0 {
+		return 0, nil
+	}
+	tx, err := runtime.BeginTx(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	type update struct {
+		userID    int64
+		refererID int64
+	}
+	updates := make([]update, 0, len(users))
+	missing := 0
+	for _, user := range users {
+		if user.RefererSourceID == 0 {
+			continue
+		}
+		userID, userOK := userMap[user.SourceID]
+		refererID, refererOK := userMap[user.RefererSourceID]
+		if !userOK {
+			continue
+		}
+		if !refererOK {
+			missing++
+			if err := store.RecordErrorTx(
+				ctx, tx.SQL, jobID, "refererBackfill", "user",
+				user.SourceID, fmt.Errorf("邀请人源 ID %d 未成功迁移", user.RefererSourceID),
+			); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		updates = append(updates, update{userID: userID, refererID: refererID})
+	}
+
+	if len(updates) > 0 {
+		var query strings.Builder
+		query.WriteString("UPDATE `user` SET referer_id = CASE id ")
+		args := make([]any, 0, len(updates)*3)
+		for _, item := range updates {
+			query.WriteString("WHEN ? THEN ? ")
+			args = append(args, item.userID, item.refererID)
+		}
+		query.WriteString("ELSE referer_id END WHERE id IN (")
+		for index, item := range updates {
+			if index > 0 {
+				query.WriteByte(',')
+			}
+			query.WriteByte('?')
+			args = append(args, item.userID)
+		}
+		query.WriteByte(')')
+		if _, err := tx.SQL.ExecContext(ctx, query.String(), args...); err != nil {
+			return 0, err
+		}
+	}
+
+	next := *cp
+	next.LastSourceID = users[len(users)-1].SourceID
+	next.Done += int64(len(users))
+	next.Errors += int64(missing)
+	if err := store.RecordBatchTx(ctx, tx.SQL, checkpoint.BatchRecord{
+		JobID: jobID, Phase: "refererBackfill",
+		CursorFrom: users[0].SourceID, CursorTo: next.LastSourceID,
+		Attempted: len(users), Succeeded: len(users) - missing,
+		Failed: missing, Status: "committed",
+	}); err != nil {
+		return 0, err
+	}
+	if err := store.SaveCheckpointTx(ctx, tx.SQL, next, owner); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	*cp = next
+	return missing, nil
 }
 
 // BackfillReferers 回填用户邀请关系（二阶段：用户全部写入后才知道目标 ID）。

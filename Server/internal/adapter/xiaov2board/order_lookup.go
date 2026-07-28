@@ -93,3 +93,36 @@ func latestRelevantOrderJoinSQL(hasFastIndex bool) string {
 		         ) latest ON latest.id = selected.id
 		   ) o ON o.user_id = u.id AND o.plan_id = u.plan_id`
 }
+
+// latestRelevantOrderJoinUntilSQL pins the selected order to the migration
+// task's order high-water mark. Each returned fragment contains exactly one
+// placeholder for that high-water value.
+func latestRelevantOrderJoinUntilSQL(hasFastIndex bool) string {
+	if hasFastIndex {
+		return `LEFT JOIN v2_order o ON o.id = (
+		       SELECT o2.id
+		         FROM v2_order o2
+		        WHERE o2.user_id = u.id
+		          AND o2.plan_id = u.plan_id
+		          AND o2.id <= ?
+		          AND o2.status IN (1, 3)
+		          AND o2.period NOT IN ('deposit', 'reset_price')
+		        ORDER BY o2.id DESC
+		        LIMIT 1
+		   )`
+	}
+
+	return `LEFT JOIN (
+		       SELECT selected.id, selected.user_id, selected.plan_id,
+		              selected.period, selected.paid_at, selected.created_at
+		         FROM v2_order selected
+		         JOIN (
+		               SELECT user_id, plan_id, MAX(id) AS id
+		                 FROM v2_order
+		                WHERE id <= ?
+		                  AND status IN (1, 3)
+		                  AND period NOT IN ('deposit', 'reset_price')
+		                GROUP BY user_id, plan_id
+		         ) latest ON latest.id = selected.id
+		   ) o ON o.user_id = u.id AND o.plan_id = u.plan_id`
+}

@@ -51,7 +51,10 @@ For xiaov2board and v2board, the migrator currently covers:
 - Panel detection and core table row counting.
 - Dry-run checks before import.
 - Progress tracking and real-time import logs.
-- Batch user/order extraction to avoid loading large tables into memory at once.
+- Keyset-paginated user/order extraction and pooled source/target connections.
+- Bulk user/auth/order/subscription writes with binary fallback for bad rows.
+- Persistent task checkpoints and source-to-target mapping ledgers for safe resume.
+- Safe cancellation at transaction boundaries, plus live rate and ETA reporting.
 - Target schema creation through NPanel Ent migrations.
 - Migration source maps for user, plan, order, and node group references.
 
@@ -158,7 +161,10 @@ NPanel Migrator 是用于把旧代理面板数据迁移到 NPanel 的迁移工�
 - 面板类型检测和核心表行数统计。
 - 正式导入前 Dry-Run 预演。
 - 实时导入进度和日志。
-- 用户和订单支持分批读取，避免大表一次性载入内存。
+- 用户和订单使用主键游标分页，并复用源库/目标库连接池。
+- 用户、邮箱认证、订单和订阅使用 Bulk 写入；坏数据自动二分隔离。
+- 持久化迁移任务、事务断点和源 ID 映射账本，支持中断后安全续传。
+- 支持事务批次边界安全取消，并展示实时速度和预计剩余时间。
 - 通过 NPanel Ent schema 自动创建目标表结构。
 - 维护用户、套餐、订单、节点分组的源 ID 到目标 ID 映射账本。
 

@@ -17,11 +17,31 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/npanel-dev/NPanel-backend/ent"
 
 	// ent 用 mysql 驱动
 	_ "github.com/go-sql-driver/mysql"
 )
+
+const (
+	targetMaxOpenConns = 8
+	targetMaxIdleConns = 8
+)
+
+// Runtime 复用同一个 database/sql 连接池，同时为普通 Ent 操作和迁移事务提供入口。
+// 迁移事务会在同一个 *sql.Tx 上运行 Ent Bulk 与断点账本 SQL，确保原子提交。
+type Runtime struct {
+	DB     *sql.DB
+	Client *ent.Client
+}
+
+// TargetTx 是绑定到同一个 MySQL 事务的 SQL 与 Ent 客户端。
+type TargetTx struct {
+	SQL    *sql.Tx
+	Client *ent.Client
+}
 
 // NPanelConfig NPanel 目标库连接配置。
 type NPanelConfig struct {
@@ -62,6 +82,60 @@ func Open(ctx context.Context, cfg NPanelConfig) (*ent.Client, error) {
 		return nil, fmt.Errorf("打开 NPanel ent client 失败: %w", err)
 	}
 	return client, nil
+}
+
+// OpenRuntime 打开可复用连接池。调用方负责 Close。
+func OpenRuntime(ctx context.Context, cfg NPanelConfig) (*Runtime, error) {
+	sqlDB, err := sql.Open("mysql", cfg.DSN())
+	if err != nil {
+		return nil, fmt.Errorf("打开 NPanel 连接池失败: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(targetMaxOpenConns)
+	sqlDB.SetMaxIdleConns(targetMaxIdleConns)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := sqlDB.PingContext(pingCtx); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("连接 NPanel 失败: %w", err)
+	}
+
+	driver := entsql.OpenDB(dialect.MySQL, sqlDB)
+	return &Runtime{
+		DB:     sqlDB,
+		Client: ent.NewClient(ent.Driver(driver)),
+	}, nil
+}
+
+// Close 关闭 Runtime。Ent client 与 SQL pool 共用底层连接，只关闭一次 SQL pool。
+func (r *Runtime) Close() error {
+	if r == nil || r.DB == nil {
+		return nil
+	}
+	return r.DB.Close()
+}
+
+// BeginTx 创建一个 SQL 事务，并让 Ent builders 复用该事务。
+func (r *Runtime) BeginTx(ctx context.Context) (*TargetTx, error) {
+	sqlTx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	driver := entsql.NewDriver(dialect.MySQL, entsql.Conn{ExecQuerier: sqlTx})
+	return &TargetTx{
+		SQL:    sqlTx,
+		Client: ent.NewClient(ent.Driver(driver)),
+	}, nil
+}
+
+func (tx *TargetTx) Commit() error {
+	return tx.SQL.Commit()
+}
+
+func (tx *TargetTx) Rollback() error {
+	return tx.SQL.Rollback()
 }
 
 // EnsureSchema 确保目标库表结构存在（用 ent Schema.Create 建表）。

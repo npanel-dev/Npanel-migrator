@@ -15,14 +15,37 @@ import (
 // 字段映射规则见方案 6.1：密码 algo 原样保留、balance 分、banned→enable 反义。
 // 按 batchSize 分页读取，避免大表一次性载入内存。
 func ExtractUsers(ctx context.Context, cfg db.Config, batchSize int, onBatch func([]*canonical.User) error) error {
-	offset := 0
+	pool, err := db.OpenPool(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	highWater, err := db.QueryScalarDBWithTimeout(ctx, pool, 10*time.Second, "SELECT COALESCE(MAX(id), 0) FROM v2_user")
+	if err != nil {
+		return err
+	}
+	return ExtractUsersKeyset(ctx, pool, batchSize, 0, highWater, onBatch)
+}
+
+// ExtractUsersKeyset 使用主键游标分页，支持从 checkpoint 继续且避免 OFFSET 扫描。
+func ExtractUsersKeyset(
+	ctx context.Context,
+	pool *sql.DB,
+	batchSize int,
+	afterID, highWater int64,
+	onBatch func([]*canonical.User) error,
+) error {
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	lastID := afterID
 	for {
 		var batch []*canonical.User
-		err := db.QueryRows(ctx, cfg,
+		err := db.QueryRowsDBWithTimeout(ctx, pool, 30*time.Second,
 			"SELECT id, email, password, password_algo, password_salt, "+
 				"balance, commission_balance, telegram_id, token, invite_user_id, "+
 				"banned, is_admin, expired_at, created_at, updated_at "+
-				"FROM v2_user ORDER BY id LIMIT ? OFFSET ?",
+				"FROM v2_user WHERE id > ? AND id <= ? ORDER BY id LIMIT ?",
 			func(rows *sql.Rows) error {
 				u, err := scanUser(rows)
 				if err != nil {
@@ -31,10 +54,10 @@ func ExtractUsers(ctx context.Context, cfg db.Config, batchSize int, onBatch fun
 				batch = append(batch, u)
 				return nil
 			},
-			batchSize, offset,
+			lastID, highWater, batchSize,
 		)
 		if err != nil {
-			return fmt.Errorf("读取 v2_user 失败 (offset %d): %w", offset, err)
+			return fmt.Errorf("读取 v2_user 失败 (after id %d): %w", lastID, err)
 		}
 		if len(batch) == 0 {
 			return nil
@@ -45,7 +68,7 @@ func ExtractUsers(ctx context.Context, cfg db.Config, batchSize int, onBatch fun
 		if len(batch) < batchSize {
 			return nil // 已读完
 		}
-		offset += batchSize
+		lastID = batch[len(batch)-1].SourceID
 	}
 }
 

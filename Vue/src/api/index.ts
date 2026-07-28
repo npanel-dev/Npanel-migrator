@@ -266,16 +266,19 @@ export interface ImportRequest {
     durationUnit: string
     durationValue: number
   }
+  resumeJobId?: string
 }
 
 export interface ImportResponse {
   ok: boolean
   message: string
+  jobId?: string
 }
 
-export type ImportStatus = 'idle' | 'running' | 'completed' | 'failed'
+export type ImportStatus = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 export interface ProgressSnapshot {
+  jobId?: string
   status: ImportStatus
   phase: string
   phaseLabel: string
@@ -285,11 +288,64 @@ export interface ProgressSnapshot {
   startedAt?: string
   finishedAt?: string
   message: string
+  ratePerSecond: number
+  etaSeconds: number
+  resumable: boolean
+  cancelRequested: boolean
 }
 
 // 启动迁移（异步，返回任务已启动确认）
 export async function startImport(req: ImportRequest): Promise<ImportResponse> {
-  const { data } = await http.post<ImportResponse>('/import', req)
+  const { data } = await http.post<ImportResponse>('/import', req, { timeout: 300_000 })
+  return data
+}
+
+export interface MigrationJobSummary {
+  id: string
+  status: string
+  effectiveStatus: string
+  phase: string
+  total: number
+  done: number
+  errors: number
+  startedAt: string
+  updatedAt: string
+  finishedAt?: string
+  lastError?: string
+  resumable: boolean
+}
+
+export interface MigrationJobsResponse {
+  ok: boolean
+  jobs: MigrationJobSummary[]
+}
+
+export type MigrationConnectionRequest = Pick<
+  ImportRequest,
+  | 'sourceHost'
+  | 'sourcePort'
+  | 'sourceDatabase'
+  | 'sourceUsername'
+  | 'sourcePassword'
+  | 'sourcePanel'
+  | 'targetHost'
+  | 'targetPort'
+  | 'targetDatabase'
+  | 'targetUsername'
+  | 'targetPassword'
+>
+
+export async function listMigrationJobs(
+  req: MigrationConnectionRequest,
+): Promise<MigrationJobsResponse> {
+  const { data } = await http.post<MigrationJobsResponse>('/import/jobs', req, {
+    timeout: 300_000,
+  })
+  return data
+}
+
+export async function cancelImport(jobId?: string): Promise<ImportResponse> {
+  const { data } = await http.post<ImportResponse>('/import/cancel', { jobId })
   return data
 }
 
