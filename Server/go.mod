@@ -3,6 +3,7 @@ module npanel-migrator
 go 1.26.4
 
 require (
+	entgo.io/ent v0.14.5
 	github.com/go-kratos/kratos/v2 v2.9.2
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/google/uuid v1.6.0
@@ -14,7 +15,6 @@ require (
 require (
 	ariga.io/atlas v0.32.1-0.20250325101103-175b25e1c1b9 // indirect
 	dario.cat/mergo v1.0.1 // indirect
-	entgo.io/ent v0.14.5 // indirect
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/GUAIK-ORG/go-snowflake v0.0.0-20200116064823-220c4260e85f // indirect
 	github.com/agext/levenshtein v1.2.3 // indirect
@@ -41,5 +41,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apimachinery v0.34.1 // indirect
 )
-
-replace github.com/npanel-dev/NPanel-backend => /Users/mac/Project/Go/NP/NPanelPro/NPanel-backend

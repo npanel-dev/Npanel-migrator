@@ -79,7 +79,7 @@ Npanel-migrator/
 - `wire` for dependency injection code generation.
 - Access to the source panel MySQL/MariaDB database.
 - Access to the target NPanel MySQL/MariaDB database.
-- A local NPanel backend checkout if using the current `replace github.com/npanel-dev/NPanel-backend => /Users/mac/Project/Go/NP/NPanel-backend` directive in `Server/go.mod`.
+- No local NPanel backend checkout is required. Go downloads the pinned public module; target-schema capability checks preserve compatibility with additional commercial columns.
 
 ### Build
 
@@ -189,7 +189,7 @@ Npanel-migrator/
 - `wire`，用于生成依赖注入代码。
 - 可连接源面板 MySQL/MariaDB 数据库。
 - 可连接目标 NPanel MySQL/MariaDB 数据库。
-- 如果保留当前 `Server/go.mod` 里的 `replace github.com/npanel-dev/NPanel-backend => /Users/mac/Project/Go/NP/NPanel-backend`，本机需要存在对应 NPanel-backend checkout；否则需要按实际环境调整该 replace 路径。
+- 不再要求本机存在 NPanel 后端源码。Go 会下载锁定的开源模块版本；迁移器通过目标库字段能力检测兼容商业版扩展列。
 
 ### 构建
 

@@ -3,6 +3,7 @@ package writer
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -273,7 +274,6 @@ func writeSubscriptionsBulkTx(
 				SetUserID(userID).
 				SetOrderID(0).
 				SetSubscribeID(plan.ID).
-				SetIsTrial(true).
 				SetNodeGroupID(targetPlanNodeGroupID(plan)).
 				SetGroupLocked(false).
 				SetStartTime(trialAnchor).
@@ -328,6 +328,15 @@ func writeSubscriptionsBulkTx(
 		createSources = append(createSources, sub)
 	}
 
+	trialTargetIDs := make([]int64, 0, len(builders))
+	for _, sub := range subs {
+		if !sub.NeedsTrial || sub.Status == 4 {
+			continue
+		}
+		if existingID := existingTrials[trialToken(sourceMap.UserIDs[sub.UserSourceID])]; existingID > 0 {
+			trialTargetIDs = append(trialTargetIDs, existingID)
+		}
+	}
 	if len(builders) > 0 {
 		created, err := tx.Client.ProxyUserSubscribe.CreateBulk(builders...).Save(ctx)
 		if err != nil {
@@ -343,6 +352,14 @@ func writeSubscriptionsBulkTx(
 				SourceID: source.SourceID,
 				TargetID: created[index].ID,
 			})
+			if source.NeedsTrial {
+				trialTargetIDs = append(trialTargetIDs, created[index].ID)
+			}
+		}
+	}
+	if runtime.HasTrialFlagColumn && len(trialTargetIDs) > 0 {
+		if err := markTrialSubscriptions(ctx, tx.SQL, trialTargetIDs); err != nil {
+			return 0, err
 		}
 	}
 	if err := store.PutMappingsTx(ctx, tx.SQL, jobID, "subscription", mappings); err != nil {
@@ -366,6 +383,25 @@ func writeSubscriptionsBulkTx(
 	}
 	*cp = next
 	return len(builders), nil
+}
+
+func markTrialSubscriptions(ctx context.Context, tx *sql.Tx, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	var query strings.Builder
+	query.WriteString("UPDATE `user_subscribe` SET `is_trial` = 1 WHERE `id` IN (")
+	args := make([]any, 0, len(ids))
+	for index, id := range ids {
+		if index > 0 {
+			query.WriteByte(',')
+		}
+		query.WriteByte('?')
+		args = append(args, id)
+	}
+	query.WriteByte(')')
+	_, err := tx.ExecContext(ctx, query.String(), args...)
+	return err
 }
 
 func writeTrialSubscription(
