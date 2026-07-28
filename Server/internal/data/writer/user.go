@@ -2,6 +2,7 @@ package writer
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -68,7 +69,6 @@ func newUserBuilder(client *ent.Client, u *canonical.User) *ent.ProxyUserCreate 
 		SetPassword(u.PasswordHash).
 		SetAlgo(u.PasswordAlgo).
 		SetSalt(u.PasswordSalt).
-		SetSourcePanel(sourcePanelOrUnknown(u.SourcePanel)).
 		SetNillableBalance(&u.BalanceCents).
 		SetNillableCommission(&u.CommissionCents).
 		SetNillableGiftAmount(&u.GiftCents).
@@ -143,6 +143,11 @@ func writeUsersBulkTx(
 	if len(created) != len(users) {
 		return nil, fmt.Errorf("用户 Bulk 返回数量异常: got %d want %d", len(created), len(users))
 	}
+	if runtime.HasSourcePanelColumn {
+		if err := markUserSourcePanels(ctx, tx.SQL, users, created); err != nil {
+			return nil, err
+		}
+	}
 
 	authBuilders := make([]*ent.ProxyUserAuthMethodCreate, 0, len(users))
 	mappings := make([]checkpoint.EntityMapping, 0, len(users))
@@ -188,6 +193,35 @@ func writeUsersBulkTx(
 	}
 	*cp = next
 	return mappings, nil
+}
+
+func markUserSourcePanels(
+	ctx context.Context,
+	tx *sql.Tx,
+	users []*canonical.User,
+	created []*ent.ProxyUser,
+) error {
+	if len(users) == 0 || len(users) != len(created) {
+		return nil
+	}
+	var query strings.Builder
+	query.WriteString("UPDATE `user` SET `source_panel` = CASE `id` ")
+	args := make([]any, 0, len(users)*3)
+	for index, user := range users {
+		query.WriteString("WHEN ? THEN ? ")
+		args = append(args, created[index].ID, sourcePanelOrUnknown(user.SourcePanel))
+	}
+	query.WriteString("ELSE `source_panel` END WHERE `id` IN (")
+	for index, item := range created {
+		if index > 0 {
+			query.WriteByte(',')
+		}
+		query.WriteByte('?')
+		args = append(args, item.ID)
+	}
+	query.WriteByte(')')
+	_, err := tx.ExecContext(ctx, query.String(), args...)
+	return err
 }
 
 func recordRejectedEntity(

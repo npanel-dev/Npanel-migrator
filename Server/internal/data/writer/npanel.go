@@ -33,8 +33,10 @@ const (
 // Runtime 复用同一个 database/sql 连接池，同时为普通 Ent 操作和迁移事务提供入口。
 // 迁移事务会在同一个 *sql.Tx 上运行 Ent Bulk 与断点账本 SQL，确保原子提交。
 type Runtime struct {
-	DB     *sql.DB
-	Client *ent.Client
+	DB                   *sql.DB
+	Client               *ent.Client
+	HasTrialFlagColumn   bool
+	HasSourcePanelColumn bool
 }
 
 // TargetTx 是绑定到同一个 MySQL 事务的 SQL 与 Ent 客户端。
@@ -103,10 +105,42 @@ func OpenRuntime(ctx context.Context, cfg NPanelConfig) (*Runtime, error) {
 	}
 
 	driver := entsql.OpenDB(dialect.MySQL, sqlDB)
+	hasTrialFlag, err := targetColumnExists(
+		ctx, sqlDB, "user_subscribe", "is_trial",
+	)
+	if err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("检查 NPanel 订阅兼容字段失败: %w", err)
+	}
+	hasSourcePanel, err := targetColumnExists(
+		ctx, sqlDB, "user", "source_panel",
+	)
+	if err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("检查 NPanel 用户兼容字段失败: %w", err)
+	}
 	return &Runtime{
-		DB:     sqlDB,
-		Client: ent.NewClient(ent.Driver(driver)),
+		DB:                   sqlDB,
+		Client:               ent.NewClient(ent.Driver(driver)),
+		HasTrialFlagColumn:   hasTrialFlag,
+		HasSourcePanelColumn: hasSourcePanel,
 	}, nil
+}
+
+func targetColumnExists(
+	ctx context.Context,
+	db *sql.DB,
+	table, column string,
+) (bool, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var count int
+	err := db.QueryRowContext(queryCtx, `SELECT COUNT(*)
+		FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+		table, column,
+	).Scan(&count)
+	return count > 0, err
 }
 
 // Close 关闭 Runtime。Ent client 与 SQL pool 共用底层连接，只关闭一次 SQL pool。

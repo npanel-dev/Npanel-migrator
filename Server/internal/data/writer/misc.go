@@ -15,21 +15,25 @@ import (
 func WriteCoupons(ctx context.Context, client *ent.Client, coupons []*canonical.Coupon) (int, error) {
 	written := 0
 	for _, c := range coupons {
-		_, err := client.ProxyCoupon.Create().
+		builder := client.ProxyCoupon.Create().
 			SetName(c.Name).
 			SetCode(c.Code). // 必填 + 唯一
 			SetType(c.Type).
 			SetDiscount(c.Discount).
-			SetCount(int64(c.Count)).
 			SetUserLimit(c.UserLimit).
-			SetUsedCount(int64(c.UsedCount)).
 			SetStartTime(c.StartTime).
 			SetExpireTime(c.ExpireTime).
 			SetEnable(c.Enable).
-			SetSubscribe("").
+			SetSubscribe(c.Subscribe).
 			SetCreatedAt(c.CreatedAt).
-			SetUpdatedAt(c.UpdatedAt).
-			Save(ctx)
+			SetUpdatedAt(c.UpdatedAt)
+		if err := setSignedIntegerBuilderField(builder, "SetCount", int64(c.Count)); err != nil {
+			continue
+		}
+		if err := setSignedIntegerBuilderField(builder, "SetUsedCount", int64(c.UsedCount)); err != nil {
+			continue
+		}
+		_, err := builder.Save(ctx)
 		if err != nil {
 			continue // 唯一冲突等跳过
 		}
