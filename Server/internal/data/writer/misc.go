@@ -20,9 +20,9 @@ func WriteCoupons(ctx context.Context, client *ent.Client, coupons []*canonical.
 			SetCode(c.Code). // 必填 + 唯一
 			SetType(c.Type).
 			SetDiscount(c.Discount).
-			SetCount(c.Count).
+			SetCount(int64(c.Count)).
 			SetUserLimit(c.UserLimit).
-			SetUsedCount(c.UsedCount).
+			SetUsedCount(int64(c.UsedCount)).
 			SetStartTime(c.StartTime).
 			SetExpireTime(c.ExpireTime).
 			SetEnable(c.Enable).

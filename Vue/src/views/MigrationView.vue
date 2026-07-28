@@ -374,7 +374,7 @@
         </el-button>
         <el-button
           type="danger"
-          :disabled="mode === 'archive' || !ready || importRunning"
+          :disabled="mode === 'archive' || !ready || importRunning || dryRunBlocked"
           :loading="importing"
           @click="onImport"
         >
@@ -612,6 +612,12 @@ const ready = computed(
 // import 运行中时禁用"开始迁移"按钮，避免重复触发。
 const importRunning = computed(
   () => progressSnapshot.value?.status === 'running',
+)
+// 已执行预演且存在阻断问题时，前端直接禁用迁移；后端仍会再次强制预演，
+// 防止绕过 UI 或使用过期报告。
+const dryRunBlocked = computed(
+  () => selectedModules.value.includes('users') &&
+    dryRunReport.value?.summary.canProceed === false,
 )
 
 // 挂载时查询一次进度（若上次有未完成的任务，恢复显示）。

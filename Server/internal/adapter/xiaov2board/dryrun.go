@@ -3,7 +3,10 @@ package xiaov2board
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"strings"
+	"time"
 
 	"npanel-migrator/internal/data/db"
 )
@@ -56,6 +59,7 @@ func DryRun(ctx context.Context, cfg db.Config) (*DryRunReport, error) {
 	report := &DryRunReport{Panel: "xiaov2board"}
 
 	// 逐项检测，每项独立容错（单项失败不影响其他项）。
+	report.checkMissingEmails(ctx, cfg)
 	report.checkDuplicateEmails(ctx, cfg)
 	report.checkNegativeBalance(ctx, cfg)
 	report.checkZeroTransferUsers(ctx, cfg)
@@ -81,6 +85,25 @@ func DryRun(ctx context.Context, cfg db.Config) (*DryRunReport, error) {
 	return report, nil
 }
 
+// checkMissingEmails 检测无法创建邮箱认证记录的用户。
+// NPanel 邮箱登录依赖 user_auth_methods；空邮箱用户迁移后无法使用原账号登录。
+func (r *DryRunReport) checkMissingEmails(ctx context.Context, cfg db.Config) {
+	count, err := db.QueryScalar(ctx, cfg,
+		"SELECT COUNT(*) FROM v2_user WHERE email IS NULL OR TRIM(email) = ''")
+	if err != nil {
+		r.add(SeverityError, "email_check_failed",
+			"查询空邮箱用户失败，无法确认迁移后登录兼容性: "+err.Error(), 0, nil)
+		return
+	}
+	if count > 0 {
+		r.add(SeverityError, "missing_email",
+			fmt.Sprintf("存在 %d 个空邮箱用户，迁移后无法通过邮箱登录，必须先补齐邮箱", count),
+			count, nil)
+	} else {
+		r.add(SeverityInfo, "missing_email", "无空邮箱用户", 0, nil)
+	}
+}
+
 // checkDuplicateEmails 检测重复邮箱（迁移后会撞 user_auth_methods.auth_identifier 唯一约束）。
 func (r *DryRunReport) checkDuplicateEmails(ctx context.Context, cfg db.Config) {
 	// 查找出现次数 > 1 的邮箱，通过回调逐行扫描。
@@ -88,8 +111,9 @@ func (r *DryRunReport) checkDuplicateEmails(ctx context.Context, cfg db.Config) 
 	var sample []string
 
 	err := db.QueryRows(ctx, cfg,
-		"SELECT email, COUNT(*) AS c FROM v2_user WHERE email IS NOT NULL AND email != '' "+
-			"GROUP BY email HAVING c > 1 ORDER BY c DESC LIMIT 100",
+		"SELECT LOWER(TRIM(email)) AS normalized_email, COUNT(*) AS c "+
+			"FROM v2_user WHERE email IS NOT NULL AND TRIM(email) != '' "+
+			"GROUP BY LOWER(TRIM(email)) HAVING COUNT(*) > 1 ORDER BY c DESC LIMIT 100",
 		func(rows *sql.Rows) error {
 			var email string
 			var c int64
@@ -104,7 +128,8 @@ func (r *DryRunReport) checkDuplicateEmails(ctx context.Context, cfg db.Config) 
 		},
 	)
 	if err != nil {
-		r.add(SeverityWarning, "query_error", "查询重复邮箱失败: "+err.Error(), 0, nil)
+		r.add(SeverityError, "duplicate_email_check_failed",
+			"查询重复邮箱失败，无法确认迁移后登录兼容性: "+err.Error(), 0, nil)
 		return
 	}
 	if totalCount > 0 {
@@ -210,22 +235,121 @@ func (r *DryRunReport) checkOrphanOrders(ctx context.Context, cfg db.Config) {
 
 // checkUnsupportedPasswordHashes 检测无法保留原密码登录的哈希。
 func (r *DryRunReport) checkUnsupportedPasswordHashes(ctx context.Context, cfg db.Config) {
-	argon2Count, err := db.QueryScalar(ctx, cfg,
-		"SELECT COUNT(*) FROM v2_user WHERE (password_algo IS NULL OR password_algo = '') AND password LIKE '$argon2%'")
-	if err == nil && argon2Count > 0 {
-		r.add(SeverityError, "unsupported_password_hash",
-			fmt.Sprintf("存在 %d 个 Argon2 密码哈希用户，NPanel 当前不支持原密码校验，必须先走重置密码方案", argon2Count),
-			argon2Count, nil)
+	counts := make(map[passwordCompatibilityIssue]int64)
+	err := db.QueryRowsWithTimeout(ctx, cfg, 5*time.Minute,
+		"SELECT password_algo, password FROM v2_user",
+		func(rows *sql.Rows) error {
+			var algo, hash sql.NullString
+			if err := rows.Scan(&algo, &hash); err != nil {
+				return err
+			}
+			if issue := classifyPasswordCompatibility(algo.String, hash.String); issue != passwordCompatible {
+				counts[issue]++
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		r.add(SeverityError, "password_check_failed",
+			"读取密码兼容性数据失败，无法确认原密码登录: "+err.Error(), 0, nil)
+		return
 	}
 
-	unknownAlgoCount, err := db.QueryScalar(ctx, cfg,
-		"SELECT COUNT(*) FROM v2_user WHERE password_algo IS NOT NULL AND password_algo != '' "+
-			"AND password_algo NOT IN ('md5','sha256','md5salt','sha256salt','bcrypt','default')")
-	if err == nil && unknownAlgoCount > 0 {
-		r.add(SeverityError, "unsupported_password_algo",
-			fmt.Sprintf("存在 %d 个未知 password_algo 用户，无法保证迁移后原密码登录", unknownAlgoCount),
-			unknownAlgoCount, nil)
+	if count := counts[passwordMissingHash]; count > 0 {
+		r.add(SeverityError, "missing_password_hash",
+			fmt.Sprintf("存在 %d 个空密码哈希用户，迁移后无法使用原密码登录", count),
+			count, nil)
 	}
+	if count := counts[passwordArgon2]; count > 0 {
+		r.add(SeverityError, "unsupported_password_hash",
+			fmt.Sprintf("存在 %d 个 Argon2 密码哈希用户，NPanel 当前不支持原密码校验，必须先走重置密码方案", count),
+			count, nil)
+	}
+	if count := counts[passwordUnknownAlgo]; count > 0 {
+		r.add(SeverityError, "unsupported_password_algo",
+			fmt.Sprintf("存在 %d 个未知 password_algo 用户，无法保证迁移后原密码登录", count),
+			count, nil)
+	}
+	if count := counts[passwordUnsupportedDefault]; count > 0 {
+		r.add(SeverityError, "unsupported_default_password_hash",
+			fmt.Sprintf("存在 %d 个无法识别的 default/空算法密码哈希用户，必须先重置密码或补正 password_algo", count),
+			count, nil)
+	}
+	if count := counts[passwordInvalidHash]; count > 0 {
+		r.add(SeverityError, "invalid_password_hash",
+			fmt.Sprintf("存在 %d 个算法与哈希格式不匹配的用户，无法保证迁移后原密码登录", count),
+			count, nil)
+	}
+}
+
+type passwordCompatibilityIssue string
+
+const (
+	passwordCompatible         passwordCompatibilityIssue = ""
+	passwordMissingHash        passwordCompatibilityIssue = "missing_hash"
+	passwordArgon2             passwordCompatibilityIssue = "argon2"
+	passwordUnknownAlgo        passwordCompatibilityIssue = "unknown_algo"
+	passwordUnsupportedDefault passwordCompatibilityIssue = "unsupported_default"
+	passwordInvalidHash        passwordCompatibilityIssue = "invalid_hash"
+)
+
+// classifyPasswordCompatibility 对照 xiaov2board 与 NPanel 的真实验证公式，
+// 判断一条源密码记录是否能在不修改哈希的前提下继续使用原密码登录。
+func classifyPasswordCompatibility(algo, hash string) passwordCompatibilityIssue {
+	algo = strings.ToLower(strings.TrimSpace(algo))
+	trimmedHash := strings.TrimSpace(hash)
+	if trimmedHash == "" {
+		return passwordMissingHash
+	}
+	if trimmedHash != hash {
+		return passwordInvalidHash
+	}
+	if strings.HasPrefix(hash, "$argon2") {
+		return passwordArgon2
+	}
+
+	switch algo {
+	case "md5", "md5salt":
+		if !isLowerHexHash(hash, 32) {
+			return passwordInvalidHash
+		}
+	case "sha256", "sha256salt":
+		if !isLowerHexHash(hash, 64) {
+			return passwordInvalidHash
+		}
+	case "bcrypt":
+		if !isBcryptHash(hash) {
+			return passwordInvalidHash
+		}
+	case "", "default":
+		if isBcryptHash(hash) {
+			return passwordCompatible
+		}
+		if isNPanelPBKDF2Hash(hash) {
+			return passwordCompatible
+		}
+		return passwordUnsupportedDefault
+	default:
+		return passwordUnknownAlgo
+	}
+	return passwordCompatible
+}
+
+func isLowerHexHash(hash string, length int) bool {
+	if len(hash) != length || hash != strings.ToLower(hash) {
+		return false
+	}
+	_, err := hex.DecodeString(hash)
+	return err == nil
+}
+
+func isNPanelPBKDF2Hash(hash string) bool {
+	parts := strings.Split(hash, "$")
+	return len(parts) == 4 &&
+		parts[0] == "" &&
+		parts[1] == "pbkdf2-sha512" &&
+		parts[2] != "" &&
+		isLowerHexHash(parts[3], 64)
 }
 
 // add 添加一个问题。

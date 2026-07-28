@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/npanel-dev/NPanel-backend/ent"
 
@@ -111,6 +112,22 @@ func (s *MigrationService) StartImport(req *ImportRequest) (*ImportResponse, err
 	if err := validateModuleDependencies(req.Modules); err != nil {
 		return &ImportResponse{OK: false, Message: err.Error()}, nil
 	}
+	if globalTracker.IsRunning() {
+		return &ImportResponse{
+			OK:      false,
+			Message: "已有迁移任务正在运行，请等待完成",
+		}, nil
+	}
+	if hasModule(req.Modules, ModuleUsers) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := validateImportPreflight(ctx, req); err != nil {
+			return &ImportResponse{
+				OK:      false,
+				Message: err.Error(),
+			}, nil
+		}
+	}
 	// 加锁确保只有一个 import 任务。
 	if !globalTracker.Start() {
 		return &ImportResponse{
@@ -131,6 +148,54 @@ func (s *MigrationService) StartImport(req *ImportRequest) (*ImportResponse, err
 		OK:      true,
 		Message: "迁移任务已启动",
 	}, nil
+}
+
+// validateImportPreflight 在正式写入前重新执行服务端预演。
+// 不能只依赖前端展示的 dry-run 结果，否则调用 API 或跳过预演仍可导入
+// 无法使用原账号密码登录的用户。
+func validateImportPreflight(ctx context.Context, req *ImportRequest) error {
+	sourceCfg := db.Config{
+		Host: req.SourceHost, Port: req.SourcePort, Database: req.SourceDatabase,
+		Username: req.SourceUsername, Password: req.SourcePassword,
+	}
+	result, err := detector.Detect(ctx, sourceCfg, req.SourcePanel)
+	if err != nil {
+		return fmt.Errorf("迁移前面板探测失败: %w", err)
+	}
+	if !isV2boardFamily(result.Panel) {
+		return fmt.Errorf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel)
+	}
+
+	report, err := xiaov2board.DryRun(ctx, sourceCfg)
+	if err != nil {
+		return fmt.Errorf("迁移前预演失败: %w", err)
+	}
+	report.Panel = string(result.Panel)
+	return dryRunBlockingError(report)
+}
+
+func dryRunBlockingError(report *xiaov2board.DryRunReport) error {
+	if report == nil {
+		return fmt.Errorf("迁移前预演未返回报告，已拒绝开始迁移")
+	}
+	var blockers []string
+	for _, issue := range report.Issues {
+		if issue.Severity != xiaov2board.SeverityError {
+			continue
+		}
+		message := issue.Message
+		if issue.Count > 0 {
+			message = fmt.Sprintf("%s（%d 条）", message, issue.Count)
+		}
+		blockers = append(blockers, message)
+	}
+	if len(blockers) == 0 && report.Summary.CanProceed {
+		return nil
+	}
+	if len(blockers) == 0 {
+		return fmt.Errorf("迁移预演未通过，已拒绝开始迁移")
+	}
+	return fmt.Errorf("迁移预演存在阻断问题，已拒绝开始迁移: %s", strings.Join(blockers, "；"))
 }
 
 func validateModuleDependencies(modules []string) error {

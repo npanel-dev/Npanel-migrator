@@ -100,9 +100,11 @@ func normalizeAlgo(algo, hash string) string {
 	algo = strings.ToLower(strings.TrimSpace(algo))
 	hash = strings.TrimSpace(hash)
 	switch algo {
-	case "md5", "sha256", "md5salt", "sha256salt", "bcrypt", "default":
+	case "md5", "sha256", "md5salt", "sha256salt", "bcrypt":
 		return algo
-	case "":
+	case "", "default":
+		// xiaov2board 的 default 语义是 PHP password_verify，不等同于
+		// NPanel 的 PBKDF2 default。PHP bcrypt 必须显式映射为 bcrypt。
 		if isBcryptHash(hash) {
 			return "bcrypt"
 		}
@@ -113,10 +115,32 @@ func normalizeAlgo(algo, hash string) string {
 }
 
 func isBcryptHash(hash string) bool {
-	return strings.HasPrefix(hash, "$2a$") ||
-		strings.HasPrefix(hash, "$2b$") ||
-		strings.HasPrefix(hash, "$2x$") ||
-		strings.HasPrefix(hash, "$2y$")
+	if len(hash) != 60 ||
+		!(strings.HasPrefix(hash, "$2a$") ||
+			strings.HasPrefix(hash, "$2b$") ||
+			strings.HasPrefix(hash, "$2x$") ||
+			strings.HasPrefix(hash, "$2y$")) {
+		return false
+	}
+	if hash[4] < '0' || hash[4] > '9' ||
+		hash[5] < '0' || hash[5] > '9' ||
+		hash[6] != '$' {
+		return false
+	}
+	cost := int(hash[4]-'0')*10 + int(hash[5]-'0')
+	if cost < 4 || cost > 31 {
+		return false
+	}
+	for i := 7; i < len(hash); i++ {
+		c := hash[i]
+		if !((c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '.' || c == '/') {
+			return false
+		}
+	}
+	return true
 }
 
 // bannedToEnable v2board banned(0/1) → NPanel enable(bool)。
