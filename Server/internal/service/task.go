@@ -118,7 +118,7 @@ func (s *MigrationService) runDryRun(req *DryRunRequest) {
 		return
 	}
 
-	dryRunTracker.Update(progress.PhasePlans, "正在检测冲突", 0, 8, 0)
+	dryRunTracker.Update(progress.PhasePlans, "正在检测冲突", 0, 9, 0)
 	report, err := xiaov2board.DryRun(ctx, cfg)
 	if err != nil {
 		dryRunTracker.Fail("预演失败: " + err.Error())
@@ -145,7 +145,7 @@ func (s *MigrationService) runDryRun(req *DryRunRequest) {
 	if report.Summary.CanProceed {
 		canProceed = "可以继续"
 	}
-	dryRunTracker.Update(progress.PhaseDone, "预演完成", 8, 8, report.Summary.ErrorCount)
+	dryRunTracker.Update(progress.PhaseDone, "预演完成", 9, 9, report.Summary.ErrorCount)
 	dryRunTracker.Complete(fmt.Sprintf("预演完成：%s（错误 %d、警告 %d）",
 		canProceed, report.Summary.ErrorCount, report.Summary.WarningCount))
 }
