@@ -91,7 +91,7 @@ type UserSubscription struct {
 	Token         string
 	UUID          string
 	StartTime     time.Time
-	// ExpireTime 过期时间。nil 表示永久（writer 转 Unix 0）。
+	// ExpireTime 过期时间。nil 表示永久（writer 保持为数据库 NULL）。
 	ExpireTime    *time.Time
 	TrafficBytes  int64 // 流量上限（字节）
 	UploadBytes   int64 // 已上传

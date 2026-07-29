@@ -5,7 +5,7 @@
 // 让 ent 自动处理 JSON 字段、指针可空字段、默认值、唯一约束。
 //
 // 关键映射规则（见方案第 6 章）：
-//   - 永久订阅：expire_time = Unix 0（'1970-01-01'），不用 NULL
+//   - 永久订阅：expire_time = NULL（NPanel 同时兼容历史 Unix 0）
 //   - status=4：被后续订阅取代则跳过，孤立则转 status=3
 //   - 密码 algo：原样写入，依赖 NPanel 已补 sha256salt 分支
 //   - 时间戳：Unix 秒 → time.Time
