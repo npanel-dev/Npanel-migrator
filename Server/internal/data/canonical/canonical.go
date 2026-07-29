@@ -91,6 +91,7 @@ type UserSubscription struct {
 	Token         string
 	UUID          string
 	StartTime     time.Time
+	CreatedAt     time.Time
 	// ExpireTime 过期时间。nil 表示源端永久订阅；writer 将其转换为迁移开始时间 + 1 个月。
 	ExpireTime    *time.Time
 	TrafficBytes  int64 // 流量上限（字节）

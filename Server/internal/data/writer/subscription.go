@@ -102,6 +102,7 @@ func WriteSubscriptions(
 			SetNodeGroupID(targetPlanNodeGroupID(targetPlan)).
 			SetGroupLocked(false).
 			SetStartTime(s.StartTime).
+			SetCreatedAt(s.CreatedAt).
 			SetExpireTime(expireTime).
 			SetTraffic(s.TrafficBytes).
 			SetDownload(s.DownloadBytes).
@@ -271,6 +272,7 @@ func writeSubscriptionsBulkTx(
 				SetNodeGroupID(targetPlanNodeGroupID(plan)).
 				SetGroupLocked(false).
 				SetStartTime(trialAnchor).
+				SetCreatedAt(trialAnchor).
 				SetExpireTime(expireTime).
 				SetTraffic(plan.Traffic).
 				SetDownload(0).
@@ -298,6 +300,7 @@ func writeSubscriptionsBulkTx(
 			SetNodeGroupID(targetPlanNodeGroupID(plan)).
 			SetGroupLocked(false).
 			SetStartTime(sub.StartTime).
+			SetCreatedAt(sub.CreatedAt).
 			SetExpireTime(expireTime).
 			SetTraffic(sub.TrafficBytes).
 			SetDownload(sub.DownloadBytes).
@@ -427,6 +430,7 @@ func writeTrialSubscription(
 		SetNodeGroupID(targetPlanNodeGroupID(targetPlan)).
 		SetGroupLocked(false).
 		SetStartTime(startTime).
+		SetCreatedAt(migrationAnchor).
 		SetExpireTime(expireTime).
 		SetTraffic(targetPlan.Traffic).
 		SetDownload(0).

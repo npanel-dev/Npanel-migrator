@@ -56,7 +56,7 @@ type NPanelConfig struct {
 
 // DSN 构造 NPanel MySQL DSN（带连接超时，避免对不可达地址长时间阻塞）。
 func (c NPanelConfig) DSN() string {
-	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=True&loc=Local&timeout=5s&readTimeout=10s&writeTimeout=10s",
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=True&loc=UTC&timeout=5s&readTimeout=10s&writeTimeout=10s",
 		c.Username, c.Password, c.Host, c.Port, c.Database)
 }
 
