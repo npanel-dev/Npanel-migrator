@@ -26,7 +26,7 @@ type TrialAssignment struct {
 // WriteSubscriptions 批量写入用户订阅。
 //
 // 映射规则（方案 6.3）：
-//   - 永久订阅（ExpireTime==nil）→ expire_time = NULL
+//   - 永久订阅（ExpireTime==nil）→ expire_time = 本次写入开始时间 + 1 个月
 //   - status=4（已扣除）：跳过（不写入 user_subscribe），由调用方决定是否归档流量
 //   - status=5/stopped：转 status=3（过期）+ note 标记
 //   - status=3 且有实际过期时间时补 finished_at，避免被 7 天过滤规则隐藏
@@ -42,6 +42,7 @@ func WriteSubscriptions(
 	errCount := 0
 	written := 0
 	planCache := make(map[int64]*ent.ProxySubscribe)
+	migrationAnchor := time.Now()
 
 	for _, s := range subs {
 		// status=4（已扣除）：跳过（方案 6.3.2）。
@@ -57,7 +58,9 @@ func WriteSubscriptions(
 		}
 
 		if s.NeedsTrial {
-			created, err := writeTrialSubscription(ctx, client, npanelUserID, trial, planCache)
+			created, err := writeTrialSubscription(
+				ctx, client, npanelUserID, trial, migrationAnchor, planCache,
+			)
 			if err != nil {
 				return written, errCount, fmt.Errorf("为源用户 %d 创建体验订阅失败: %w", s.UserSourceID, err)
 			}
@@ -81,6 +84,7 @@ func WriteSubscriptions(
 
 		// 映射目标 status。
 		npanelStatus := mapStatus(s.Status)
+		expireTime := importedSubscriptionExpireTime(s.ExpireTime, migrationAnchor)
 
 		// 订单关联：若存在则映射，否则填 0（NPanel order_id 非外键，允许 0）。
 		var orderID int64 = 0
@@ -98,7 +102,7 @@ func WriteSubscriptions(
 			SetNodeGroupID(targetPlanNodeGroupID(targetPlan)).
 			SetGroupLocked(false).
 			SetStartTime(s.StartTime).
-			SetNillableExpireTime(s.ExpireTime).
+			SetExpireTime(expireTime).
 			SetTraffic(s.TrafficBytes).
 			SetDownload(s.DownloadBytes).
 			SetUpload(s.UploadBytes).
@@ -114,7 +118,7 @@ func WriteSubscriptions(
 
 		// status=3/5 转 3 时补 finished_at，避免被 NPanel 的 7 天过滤隐藏。
 		if npanelStatus == 3 && s.ExpireTime != nil {
-			builder.SetFinishedAt(*s.ExpireTime)
+			builder.SetFinishedAt(expireTime)
 		}
 
 		// status=5（stopped）加 note 标记。
@@ -267,7 +271,7 @@ func writeSubscriptionsBulkTx(
 				SetNodeGroupID(targetPlanNodeGroupID(plan)).
 				SetGroupLocked(false).
 				SetStartTime(trialAnchor).
-				SetNillableExpireTime(expireTime).
+				SetExpireTime(expireTime).
 				SetTraffic(plan.Traffic).
 				SetDownload(0).
 				SetUpload(0).
@@ -281,6 +285,7 @@ func writeSubscriptionsBulkTx(
 
 		subscribeID := sourceMap.PlanIDs[sub.PlanSourceID]
 		plan := planCache[subscribeID]
+		expireTime := importedSubscriptionExpireTime(sub.ExpireTime, trialAnchor)
 		orderID := int64(0)
 		if sub.OrderSourceID != 0 {
 			orderID = sourceMap.OrderIDs[sub.OrderSourceID]
@@ -293,7 +298,7 @@ func writeSubscriptionsBulkTx(
 			SetNodeGroupID(targetPlanNodeGroupID(plan)).
 			SetGroupLocked(false).
 			SetStartTime(sub.StartTime).
-			SetNillableExpireTime(sub.ExpireTime).
+			SetExpireTime(expireTime).
 			SetTraffic(sub.TrafficBytes).
 			SetDownload(sub.DownloadBytes).
 			SetUpload(sub.UploadBytes).
@@ -305,7 +310,7 @@ func writeSubscriptionsBulkTx(
 			builder.SetUUID(sub.UUID)
 		}
 		if status == 3 && sub.ExpireTime != nil {
-			builder.SetFinishedAt(*sub.ExpireTime)
+			builder.SetFinishedAt(expireTime)
 		}
 		if sub.Status == 5 {
 			builder.SetNote("migrated from source status=5(stopped)")
@@ -395,6 +400,7 @@ func writeTrialSubscription(
 	client *ent.Client,
 	userID int64,
 	trial TrialAssignment,
+	migrationAnchor time.Time,
 	planCache map[int64]*ent.ProxySubscribe,
 ) (bool, error) {
 	targetPlan, err := getTargetPlan(ctx, client, trial.SubscribeID, planCache)
@@ -412,7 +418,7 @@ func writeTrialSubscription(
 		return false, nil
 	}
 
-	startTime := time.Now()
+	startTime := migrationAnchor
 	expireTime := subscriptionExpireTime(startTime, trial.DurationUnit, trial.DurationValue)
 	_, err = client.ProxyUserSubscribe.Create().
 		SetUserID(userID).
@@ -421,7 +427,7 @@ func writeTrialSubscription(
 		SetNodeGroupID(targetPlanNodeGroupID(targetPlan)).
 		SetGroupLocked(false).
 		SetStartTime(startTime).
-		SetNillableExpireTime(expireTime).
+		SetExpireTime(expireTime).
 		SetTraffic(targetPlan.Traffic).
 		SetDownload(0).
 		SetUpload(0).
@@ -467,7 +473,14 @@ func trialToken(userID int64) string {
 	return hex.EncodeToString(hash[:16])
 }
 
-func subscriptionExpireTime(start time.Time, unit string, value int64) *time.Time {
+func importedSubscriptionExpireTime(sourceExpireTime *time.Time, migrationAnchor time.Time) time.Time {
+	if sourceExpireTime != nil {
+		return *sourceExpireTime
+	}
+	return migrationAnchor.AddDate(0, 1, 0)
+}
+
+func subscriptionExpireTime(start time.Time, unit string, value int64) time.Time {
 	var expireTime time.Time
 	switch strings.ToLower(strings.TrimSpace(unit)) {
 	case "year":
@@ -487,11 +500,11 @@ func subscriptionExpireTime(start time.Time, unit string, value int64) *time.Tim
 	case "half_year":
 		expireTime = start.AddDate(0, int(value)*6, 0)
 	case "nolimit", "no_limit":
-		return nil
+		expireTime = start.AddDate(0, 1, 0)
 	default:
 		expireTime = start
 	}
-	return &expireTime
+	return expireTime
 }
 
 // mapStatus 源 status → NPanel status。
