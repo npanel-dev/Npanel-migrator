@@ -63,7 +63,7 @@ func DryRun(ctx context.Context, cfg db.Config) (*DryRunReport, error) {
 	report.checkDuplicateEmails(ctx, cfg)
 	report.checkNegativeBalance(ctx, cfg)
 	report.checkZeroTransferUsers(ctx, cfg)
-	report.checkPermanentSubscriptions(ctx, cfg)
+	report.checkZeroExpirySubscriptions(ctx, cfg)
 	report.checkAbnormalOrders(ctx, cfg)
 	report.checkMissingPlans(ctx, cfg)
 	report.checkOrphanOrders(ctx, cfg)
@@ -169,16 +169,17 @@ func (r *DryRunReport) checkZeroTransferUsers(ctx context.Context, cfg db.Config
 	}
 }
 
-// checkPermanentSubscriptions 检测永久订阅（expired_at=0）的数量，提示单位换算注意。
-func (r *DryRunReport) checkPermanentSubscriptions(ctx context.Context, cfg db.Config) {
+// checkZeroExpirySubscriptions 检测没有有效到期时间的用户。
+// 按迁移规则，expired_at=0 表示已失效，迁移时为其分配所选体验套餐。
+func (r *DryRunReport) checkZeroExpirySubscriptions(ctx context.Context, cfg db.Config) {
 	count, err := db.QueryScalar(ctx, cfg,
 		"SELECT COUNT(*) FROM v2_user WHERE plan_id > 0 AND expired_at = 0")
 	if err != nil {
 		return
 	}
 	if count > 0 {
-		r.add(SeverityInfo, "permanent_subscription",
-			fmt.Sprintf("存在 %d 个永久订阅用户（expired_at=0），迁移时 expire_time 须设为 Unix 0", count),
+		r.add(SeverityInfo, "zero_expiry_subscription",
+			fmt.Sprintf("存在 %d 个订阅已失效用户（expired_at=0），迁移时将分配所选体验套餐", count),
 			count, nil)
 	}
 }
