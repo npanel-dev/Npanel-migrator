@@ -65,7 +65,7 @@ func ExtractSubscriptionsAtPoolUntil(
 	}
 	query := fmt.Sprintf(
 		`SELECT u.id, u.plan_id, u.group_id, u.u, u.d, u.transfer_enable,
-		        u.expired_at, u.token, u.uuid,
+		        u.expired_at, u.token, u.uuid, u.created_at,
 		        o.id, o.period, o.paid_at, o.created_at
 		   FROM v2_user u
 		   %s
@@ -112,6 +112,7 @@ func scanSubscriptionAt(rows *sql.Rows, evaluationUnix int64) (*canonical.UserSu
 		expiredAt      sql.NullInt64
 		token          sql.NullString
 		uuid           sql.NullString
+		userCreatedAt  sql.NullInt64
 		recentOrderID  sql.NullInt64 // 最近完成订单 ID（关联用）
 		recentPeriod   sql.NullString
 		orderPaidAt    sql.NullInt64
@@ -119,7 +120,8 @@ func scanSubscriptionAt(rows *sql.Rows, evaluationUnix int64) (*canonical.UserSu
 	)
 	if err := rows.Scan(
 		&userID, &planID, &groupID, &upload, &download, &transferLimit,
-		&expiredAt, &token, &uuid, &recentOrderID, &recentPeriod, &orderPaidAt, &orderCreatedAt,
+		&expiredAt, &token, &uuid, &userCreatedAt,
+		&recentOrderID, &recentPeriod, &orderPaidAt, &orderCreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -138,15 +140,9 @@ func scanSubscriptionAt(rows *sql.Rows, evaluationUnix int64) (*canonical.UserSu
 		expireTime = &t
 	}
 
-	// 优先使用最近一次对应套餐订单的支付/创建时间。
-	startUnix := orderPaidAt.Int64
-	if startUnix <= 0 {
-		startUnix = orderCreatedAt.Int64
-	}
-	if startUnix <= 0 {
-		startUnix = evaluationUnix
-	}
-	startTime := unixToTime(startUnix)
+	startTime, createdAt := subscriptionSourceTimes(
+		orderPaidAt.Int64, orderCreatedAt.Int64, userCreatedAt.Int64, evaluationUnix,
+	)
 
 	return &canonical.UserSubscription{
 		SourceID:      userID, // 源端用 user id 作为订阅标识
@@ -157,6 +153,7 @@ func scanSubscriptionAt(rows *sql.Rows, evaluationUnix int64) (*canonical.UserSu
 		Token:         token.String,
 		UUID:          uuid.String,
 		StartTime:     startTime,
+		CreatedAt:     createdAt,
 		ExpireTime:    expireTime,
 		TrafficBytes:  transferLimit.Int64,
 		UploadBytes:   upload.Int64,
@@ -165,6 +162,28 @@ func scanSubscriptionAt(rows *sql.Rows, evaluationUnix int64) (*canonical.UserSu
 		NeedsTrial:    needsTrial,
 		SourcePeriod:  recentPeriod.String,
 	}, nil
+}
+
+// subscriptionSourceTimes 保留源订阅的业务时间：
+//   - 创建时间优先取最近有效订单的创建时间，缺失时回退用户注册时间。
+//   - 开始时间优先取订单支付时间，缺失时与创建时间一致。
+//   - 历史脏数据均缺失时才使用迁移任务固定的评估时间。
+func subscriptionSourceTimes(
+	orderPaidAt, orderCreatedAt, userCreatedAt, evaluationUnix int64,
+) (time.Time, time.Time) {
+	createdUnix := orderCreatedAt
+	if createdUnix <= 0 {
+		createdUnix = userCreatedAt
+	}
+	if createdUnix <= 0 {
+		createdUnix = evaluationUnix
+	}
+
+	startUnix := orderPaidAt
+	if startUnix <= 0 {
+		startUnix = createdUnix
+	}
+	return unixToTime(startUnix), unixToTime(createdUnix)
 }
 
 func subscriptionNeedsTrial(
