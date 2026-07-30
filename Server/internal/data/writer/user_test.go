@@ -8,7 +8,7 @@ import (
 )
 
 func TestTargetReferCodeWithGenerator(t *testing.T) {
-	t.Run("xiaov2board regenerates NPanel refer code", func(t *testing.T) {
+	t.Run("xiaov2board regenerates commercial refer code", func(t *testing.T) {
 		user := &canonical.User{
 			SourceID:    42,
 			SourcePanel: "xiaov2board",
@@ -18,36 +18,36 @@ func TestTargetReferCodeWithGenerator(t *testing.T) {
 		var gotID int64
 		got := targetReferCodeWithGenerator(user, func(userID int64) string {
 			gotID = userID
-			return "ABCD-EFGH-IJKL"
+			return "uXiao123"
 		})
 
-		if got != "ABCD-EFGH-IJKL" {
-			t.Fatalf("targetReferCodeWithGenerator() = %q, want NPanel code", got)
+		if got != "uXiao123" {
+			t.Fatalf("targetReferCodeWithGenerator() = %q, want commercial code", got)
 		}
 		if gotID != user.SourceID {
 			t.Fatalf("generator user ID = %d, want %d", gotID, user.SourceID)
 		}
 	})
 
-	t.Run("source panel matching is whitespace and case insensitive", func(t *testing.T) {
+	t.Run("v2board also regenerates commercial refer code", func(t *testing.T) {
 		user := &canonical.User{
 			SourceID:    7,
-			SourcePanel: " XiaoV2Board ",
-			ReferCode:   "legacy",
+			SourcePanel: " V2Board ",
+			ReferCode:   "123456789012345678901234",
 		}
 
 		got := targetReferCodeWithGenerator(user, func(int64) string {
-			return "NPAN-ELCO-DE"
+			return "uV2board"
 		})
-		if got != "NPAN-ELCO-DE" {
-			t.Fatalf("targetReferCodeWithGenerator() = %q, want generated code", got)
+		if got != "uV2board" {
+			t.Fatalf("targetReferCodeWithGenerator() = %q, want commercial code", got)
 		}
 	})
 
 	t.Run("other panels keep existing compatibility behavior", func(t *testing.T) {
 		user := &canonical.User{
 			SourceID:    9,
-			SourcePanel: "v2board",
+			SourcePanel: "xboard",
 			ReferCode:   "123456789012345678901234",
 		}
 
@@ -66,20 +66,20 @@ func TestTargetReferCodeWithGenerator(t *testing.T) {
 	})
 }
 
-func TestGenerateNPanelReferCode(t *testing.T) {
-	format := regexp.MustCompile(`^[A-Z0-9]{4}(?:-[A-Z0-9]{1,4})+$`)
+func TestGenerateCommercialReferCode(t *testing.T) {
+	format := regexp.MustCompile(`^u[A-Za-z0-9]+$`)
 	seen := make(map[string]struct{}, 256)
 
-	for range 256 {
-		code := generateNPanelReferCode(0)
+	for id := range 256 {
+		code := generateCommercialReferCode(int64(id + 1))
 		if !format.MatchString(code) {
-			t.Fatalf("generateNPanelReferCode() = %q, want NPanel dashed Base36 format", code)
+			t.Fatalf("generateCommercialReferCode() = %q, want commercial u + Base62 format", code)
 		}
 		if len(code) > 20 {
-			t.Fatalf("generateNPanelReferCode() length = %d, exceeds refer_code MaxLen 20", len(code))
+			t.Fatalf("generateCommercialReferCode() length = %d, exceeds refer_code MaxLen 20", len(code))
 		}
 		if _, exists := seen[code]; exists {
-			t.Fatalf("generateNPanelReferCode() returned duplicate %q", code)
+			t.Fatalf("generateCommercialReferCode() returned duplicate %q", code)
 		}
 		seen[code] = struct{}{}
 	}

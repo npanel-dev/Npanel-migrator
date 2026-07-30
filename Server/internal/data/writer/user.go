@@ -8,8 +8,7 @@ import (
 	"strings"
 
 	"github.com/npanel-dev/NPanel-backend/ent"
-	"github.com/npanel-dev/NPanel-backend/pkg/random"
-	"github.com/npanel-dev/NPanel-backend/pkg/snowflake"
+	"github.com/npanel-dev/NPanel-backend/pkg/uuidx"
 
 	"npanel-migrator/internal/data/canonical"
 	"npanel-migrator/internal/data/checkpoint"
@@ -379,27 +378,28 @@ func BackfillReferers(ctx context.Context, client *ent.Client, users []*canonica
 	return errCount, nil
 }
 
-// targetReferCode 把来源面板的邀请码转换成 NPanel 目标格式。
+// targetReferCode 把来源面板的邀请码转换成商业版 NPanel 目标格式。
 //
-// xiaov2board 的 token 是 32 字符 MD5；直接迁移或截断后虽然能写入数据库，
-// 但不符合 NPanel 当前注册流程生成的分段邀请码格式。邀请上下级关系由
-// referer_id 单独回填，因此这里为每个迁移用户生成新邀请码不会破坏邀请关系。
+// v2board 系的 token 通常是 32 字符 MD5；直接迁移或截断后虽然能写入数据库，
+// 但不符合商业后端 UserInviteCode 使用的 u + Base62 格式。邀请上下级关系由
+// referer_id 单独回填，因此为迁移用户生成新邀请码不会破坏邀请关系。
 func targetReferCode(u *canonical.User) string {
-	return targetReferCodeWithGenerator(u, generateNPanelReferCode)
+	return targetReferCodeWithGenerator(u, generateCommercialReferCode)
 }
 
 func targetReferCodeWithGenerator(u *canonical.User, generate func(int64) string) string {
-	if strings.EqualFold(strings.TrimSpace(u.SourcePanel), "xiaov2board") {
+	switch strings.ToLower(strings.TrimSpace(u.SourcePanel)) {
+	case "xiaov2board", "v2board":
 		return generate(u.SourceID)
+	default:
+		return truncateReferCode(u.ReferCode)
 	}
-	return truncateReferCode(u.ReferCode)
 }
 
-// generateNPanelReferCode 与 NPanel pkg/tool.GenerateReferCode 使用同一实现：
-// Snowflake ID → NPanel 自定义 Base36 → 每 4 字符插入连字符。
-func generateNPanelReferCode(_ int64) string {
-	code := random.EncodeBase36(snowflake.GetID())
-	return random.StrToDashedString(code)
+// generateCommercialReferCode 直接复用商业后端创建用户和 OAuth 注册所用的
+// uuidx.UserInviteCode，避免迁移器再维护一份可能漂移的邀请码算法。
+func generateCommercialReferCode(userID int64) string {
+	return uuidx.UserInviteCode(userID)
 }
 
 // nilIfEmpty 空字符串返回 nil（用于 Nillable 字段）。
