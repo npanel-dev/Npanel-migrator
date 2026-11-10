@@ -258,31 +258,20 @@ func (s *MigrationService) Detect(ctx context.Context, req *DetectRequest) (*Det
 		}, nil
 	}
 
-	// 2. 按探测到的面板类型调用对应 adapter。
-	//    xiaov2board 与普通 v2board 同属 v2board-family，共用字段自适应 adapter。
-	switch result.Panel {
-	case detector.PanelXiaoV2board, detector.PanelV2board:
-		report, err := xiaov2board.Detect(ctx, cfg)
-		if err != nil {
-			return &DetectResponse{OK: false, Message: "生成报告失败: " + err.Error()}, nil
-		}
-		report.Panel = string(result.Panel)
-		return &DetectResponse{
-			OK:      true,
-			Message: "报告生成成功",
-			Report:  convertReport(report),
-		}, nil
-
-	default:
-		return &DetectResponse{
-			OK:      false,
-			Message: fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel),
-		}, nil
+	// 2. 按探测到的面板类型调用对应 adapter（v2board 家族 / sspanelv3 等）。
+	adapter, err := adapterFor(result.Panel)
+	if err != nil {
+		return &DetectResponse{OK: false, Message: err.Error()}, nil
 	}
-}
-
-func isV2boardFamily(panel detector.PanelType) bool {
-	return panel == detector.PanelXiaoV2board || panel == detector.PanelV2board
+	report, err := adapter.Detect(ctx, cfg)
+	if err != nil {
+		return &DetectResponse{OK: false, Message: "生成报告失败: " + err.Error()}, nil
+	}
+	return &DetectResponse{
+		OK:      true,
+		Message: "报告生成成功",
+		Report:  report,
+	}, nil
 }
 
 // convertReport 把 adapter 的 DetectReport 转成 service 层 DTO。
@@ -323,6 +312,9 @@ type DryRunRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	Panel    string `json:"panel"`
+	// PwdMethod/PasswordSalt 源面板全局密码配置（sspanelv3 用，见 SourceOptions）。
+	PwdMethod    string `json:"pwdMethod,omitempty"`
+	PasswordSalt string `json:"passwordSalt,omitempty"`
 }
 
 // DryRunResponse dry-run 响应。
@@ -378,46 +370,41 @@ func (s *MigrationService) DryRun(ctx context.Context, req *DryRunRequest) (*Dry
 		}, nil
 	}
 
-	switch result.Panel {
-	case detector.PanelXiaoV2board, detector.PanelV2board:
-		report, err := xiaov2board.DryRun(ctx, cfg)
-		if err != nil {
-			return &DryRunResponse{OK: false, Message: "预演失败: " + err.Error()}, nil
-		}
-		report.Panel = string(result.Panel)
-		return &DryRunResponse{
-			OK:      true,
-			Message: "预演完成",
-			Report:  convertDryRunReport(report),
-		}, nil
-
-	default:
-		return &DryRunResponse{
-			OK:      false,
-			Message: fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel),
-		}, nil
+	adapter, err := adapterFor(result.Panel)
+	if err != nil {
+		return &DryRunResponse{OK: false, Message: err.Error()}, nil
 	}
+	outcome, err := adapter.DryRun(ctx, cfg, SourceOptions{
+		PwdMethod: req.PwdMethod, Salt: req.PasswordSalt,
+	})
+	if err != nil {
+		return &DryRunResponse{OK: false, Message: "预演失败: " + err.Error()}, nil
+	}
+	return &DryRunResponse{
+		OK:      true,
+		Message: "预演完成",
+		Report:  dryRunOutcomeToVO(outcome),
+	}, nil
 }
 
-// convertDryRunReport 把 adapter 的 DryRunReport 转成 service 层 DTO。
-func convertDryRunReport(r *xiaov2board.DryRunReport) *DryRunReportVO {
+// dryRunOutcomeToVO 中性预演结果 → 前端 VO。
+func dryRunOutcomeToVO(o *dryRunOutcome) *DryRunReportVO {
 	vo := &DryRunReportVO{
-		Panel: r.Panel,
+		Panel: o.Panel,
 		Summary: DryRunSummaryVO{
-			ErrorCount:   r.Summary.ErrorCount,
-			WarningCount: r.Summary.WarningCount,
-			InfoCount:    r.Summary.InfoCount,
-			CanProceed:   r.Summary.CanProceed,
+			ErrorCount:   o.ErrorCount,
+			WarningCount: o.WarningCount,
+			InfoCount:    o.InfoCount,
+			CanProceed:   o.CanProceed,
 		},
 	}
-	for _, iss := range r.Issues {
+	for _, iss := range o.Issues {
 		vo.Issues = append(vo.Issues, IssueVO{
-			Severity: string(iss.Severity),
-			Category: iss.Category,
-			Message:  iss.Message,
-			Count:    iss.Count,
-			Sample:   iss.Sample,
+			Severity: iss.Severity, Category: iss.Category,
+			Message: iss.Message, Count: iss.Count,
 		})
 	}
 	return vo
 }
+
+// convertDryRunReport 已由 dryRunOutcomeToVO（基于中性 dryRunOutcome）取代。

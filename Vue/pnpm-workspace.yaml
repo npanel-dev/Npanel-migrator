@@ -1,0 +1,3 @@
+# @parcel/watcher 是 sass/vite 的传递依赖（构建原生文件监听），批准其构建脚本。
+allowBuilds:
+  '@parcel/watcher': true

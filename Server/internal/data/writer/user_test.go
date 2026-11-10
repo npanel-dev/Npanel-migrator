@@ -44,6 +44,26 @@ func TestTargetReferCodeWithGenerator(t *testing.T) {
 		}
 	})
 
+	t.Run("sspanelv3 regenerates refer code (4-char codes collide)", func(t *testing.T) {
+		user := &canonical.User{
+			SourceID:    11,
+			SourcePanel: "sspanelv3",
+			ReferCode:   "Ab3d",
+		}
+
+		var gotID int64
+		got := targetReferCodeWithGenerator(user, func(userID int64) string {
+			gotID = userID
+			return "uSSPanel"
+		})
+		if got != "uSSPanel" {
+			t.Fatalf("targetReferCodeWithGenerator() = %q, want commercial code", got)
+		}
+		if gotID != 11 {
+			t.Fatalf("generator user ID = %d, want 11", gotID)
+		}
+	})
+
 	t.Run("other panels keep existing compatibility behavior", func(t *testing.T) {
 		user := &canonical.User{
 			SourceID:    9,

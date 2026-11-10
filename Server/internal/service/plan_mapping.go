@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"npanel-migrator/internal/adapter/xiaov2board"
 	"npanel-migrator/internal/data/db"
+	"npanel-migrator/internal/data/detector"
 )
 
 const planMappingQueryTimeout = 5 * time.Minute
@@ -107,67 +107,32 @@ func (s *MigrationService) GetPlanMappingOptions(ctx context.Context, req *PlanM
 		return nil, fmt.Errorf("目标库没有可映射的套餐，请先在 NPanel 创建套餐")
 	}
 
-	sourcePlans, err := xiaov2board.ExtractPlans(ctx, sourceCfg)
+	// 按声明的面板类型（或自动探测）选择 adapter。
+	panel := strings.TrimSpace(req.SourcePanel)
+	if panel == "" || panel == "auto" || panel == string(detector.PanelUnknown) {
+		result, err := detector.Detect(ctx, sourceCfg, "")
+		if err != nil {
+			return nil, fmt.Errorf("识别源面板失败: %w", err)
+		}
+		panel = string(result.Panel)
+	}
+	adapter, err := adapterFor(detector.PanelType(panel))
 	if err != nil {
 		return nil, err
 	}
-	activeCounts := make(map[int64]int64)
-	activePeriodCounts := make(map[string]int64)
-	orderCounts := make(map[int64]int64)
-	orderPeriodCounts := make(map[string]int64)
-	if err := db.QueryRowsWithTimeout(ctx, sourceCfg, planMappingQueryTimeout,
-		`SELECT plan_id, COUNT(*)
-		   FROM v2_user
-		  WHERE banned = 0
-		    AND COALESCE(plan_id, 0) > 0
-		    AND COALESCE(transfer_enable, 0) > 0
-		    AND (expired_at IS NULL OR expired_at > UNIX_TIMESTAMP())
-		  GROUP BY plan_id`,
-		func(rows *sql.Rows) error {
-			var planID, count int64
-			if err := rows.Scan(&planID, &count); err != nil {
-				return err
-			}
-			activeCounts[planID] = count
-			return nil
-		}); err != nil {
-		return nil, fmt.Errorf("统计源套餐有效用户失败: %w", err)
-	}
-	activePeriodCounts, sourceOrderLookupIndexed, err := xiaov2board.ActiveSubscriptionPeriodCounts(ctx, sourceCfg)
+
+	sourcePlans, err := adapter.Extract(ctx, sourceCfg).Plans(ctx, sourceCfg)
 	if err != nil {
-		return nil, fmt.Errorf("统计源套餐周期有效用户失败: %w", err)
+		return nil, err
 	}
-	if err := db.QueryRowsWithTimeout(ctx, sourceCfg, planMappingQueryTimeout,
-		`SELECT plan_id, period, COUNT(*)
-		   FROM v2_order
-		  WHERE COALESCE(plan_id, 0) > 0
-		    AND period <> 'deposit'
-		  GROUP BY plan_id, period`,
-		func(rows *sql.Rows) error {
-			var planID, count int64
-			var period sql.NullString
-			if err := rows.Scan(&planID, &period, &count); err != nil {
-				return err
-			}
-			orderCounts[planID] += count
-			if period.Valid && period.String != "" {
-				orderPeriodCounts[fmt.Sprintf("%d:%s", planID, period.String)] = count
-			}
-			return nil
-		}); err != nil {
-		return nil, fmt.Errorf("统计源套餐历史订单失败: %w", err)
-	}
-	inactiveCount, err := db.QueryScalarWithTimeout(ctx, sourceCfg, planMappingQueryTimeout,
-		`SELECT COUNT(*) FROM v2_user
-		  WHERE banned = 0
-		    AND NOT (
-		      COALESCE(plan_id, 0) > 0
-		      AND COALESCE(transfer_enable, 0) > 0
-		      AND (expired_at IS NULL OR expired_at > UNIX_TIMESTAMP())
-		    )`)
+	stats, err := adapter.PlanStats(ctx, sourceCfg)
 	if err != nil {
-		return nil, fmt.Errorf("统计无有效订阅用户失败: %w", err)
+		return nil, err
 	}
+	activeCounts := stats.ActiveUserCounts
+	activePeriodCounts := stats.ActivePeriodCounts
+	orderCounts := stats.OrderCounts
+	orderPeriodCounts := stats.OrderPeriodCounts
 
 	sourceOptions := make([]SourcePlanMappingOption, 0, len(sourcePlans))
 	seenPlanIDs := make(map[int64]bool)
@@ -192,7 +157,7 @@ func (s *MigrationService) GetPlanMappingOptions(ctx context.Context, req *PlanM
 				OrderCount:      orderPeriodCounts[fmt.Sprintf("%d:%s", plan.SourceID, option.SourceKey)],
 			})
 		}
-		for _, option := range knownSourcePeriods() {
+		for _, option := range stats.KnownPeriods {
 			key := fmt.Sprintf("%d:%s", plan.SourceID, option.SourcePeriod)
 			activeCount := activePeriodCounts[key]
 			orderCount := orderPeriodCounts[key]
@@ -221,7 +186,7 @@ func (s *MigrationService) GetPlanMappingOptions(ctx context.Context, req *PlanM
 			ActiveUserCount: activeCounts[planID], OrderCount: orderCounts[planID],
 			PriceOptions: []SourcePlanOption{},
 		}
-		for _, option := range knownSourcePeriods() {
+		for _, option := range stats.KnownPeriods {
 			key := fmt.Sprintf("%d:%s", planID, option.SourcePeriod)
 			option.ActiveUserCount = activePeriodCounts[key]
 			option.OrderCount = orderPeriodCounts[key]
@@ -240,8 +205,8 @@ func (s *MigrationService) GetPlanMappingOptions(ctx context.Context, req *PlanM
 	return &PlanMappingOptionsResponse{
 		OK: true, Message: "套餐映射选项读取成功",
 		SourcePlans: sourceOptions, TargetPlans: targetPlans,
-		InactiveUserCount: inactiveCount, TrialDefaults: trialDefaults,
-		SourceOrderLookupIndexed: sourceOrderLookupIndexed,
+		InactiveUserCount: stats.InactiveUserCount, TrialDefaults: trialDefaults,
+		SourceOrderLookupIndexed: stats.OrderLookupIndexed,
 	}, nil
 }
 

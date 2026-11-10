@@ -51,6 +51,16 @@ func TestDetectFromTables(t *testing.T) {
 			want:  PanelSSPanel,
 		},
 		{
+			name:  "sspanelv3: user + ss_node + shop",
+			found: set("user", "ss_node", "shop", "bought", "code", "ticket"),
+			want:  PanelSSPanelV3,
+		},
+		{
+			name:  "sspanelv3: 缺 shop 时不判定为 sspanelv3",
+			found: set("user", "ss_node"),
+			want:  PanelUnknown,
+		},
+		{
 			name:  "未知: 无任何特征表",
 			found: set("foo", "bar"),
 			want:  PanelUnknown,

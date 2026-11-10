@@ -19,10 +19,18 @@ export default {
     xboard: 'Xboard',
     ppanel: 'PPanel',
     sspanel: 'SSPanel-UIM',
+    sspanelv3: 'SSPanel (legacy v3)',
   },
 
   panelLabel: 'Panel Type',
   selectPanelPlaceholder: 'Select source panel',
+
+  // ss-panel v3 panel-level password options
+  pwdMethodLabel: 'Password Algo',
+  pwdMethodAuto: 'Auto detect (by hash length)',
+  pwdSaltLabel: 'Password Salt',
+  pwdSaltPlaceholder: '$_ENV["salt"] from source config.php',
+  pwdSaltTip: 'Legacy ss-panel hashes are sha256/md5(password+salt); dry-run blocks migration until the salt is provided',
 
   sourcePanel: 'Source Panel',
   databaseHost: 'Host',

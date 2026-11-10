@@ -252,6 +252,9 @@ export interface ImportRequest {
   sourceUsername: string
   sourcePassword: string
   sourcePanel?: string
+  // 源面板全局密码配置（sspanelv3 的 pwdMethod 与 salt）
+  sourcePwdMethod?: string
+  sourcePasswordSalt?: string
   targetHost: string
   targetPort: number
   targetDatabase: string
@@ -328,6 +331,8 @@ export type MigrationConnectionRequest = Pick<
   | 'sourceUsername'
   | 'sourcePassword'
   | 'sourcePanel'
+  | 'sourcePwdMethod'
+  | 'sourcePasswordSalt'
   | 'targetHost'
   | 'targetPort'
   | 'targetDatabase'
@@ -401,14 +406,22 @@ export interface TaskProgressSnapshot {
   report?: DetectData | DryRunReport
 }
 
+// 源面板级密码配置（sspanelv3 用）
+export interface PanelPasswordOptions {
+  pwdMethod?: string
+  passwordSalt?: string
+}
+
 // 异步启动 detect
 export async function startDetectAsync(
   config: DatabaseConfig,
   panel?: string,
+  passwordOptions?: PanelPasswordOptions,
 ): Promise<ImportResponse> {
   const { data } = await http.post<ImportResponse>('/detect/start', {
     ...config,
     panel,
+    ...passwordOptions,
   })
   return data
 }
@@ -417,10 +430,12 @@ export async function startDetectAsync(
 export async function startDryRunAsync(
   config: DatabaseConfig,
   panel?: string,
+  passwordOptions?: PanelPasswordOptions,
 ): Promise<ImportResponse> {
   const { data } = await http.post<ImportResponse>('/dry-run/start', {
     ...config,
     panel,
+    ...passwordOptions,
   })
   return data
 }

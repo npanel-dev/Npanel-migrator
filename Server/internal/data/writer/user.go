@@ -391,6 +391,10 @@ func targetReferCodeWithGenerator(u *canonical.User, generate func(int64) string
 	switch strings.ToLower(strings.TrimSpace(u.SourcePanel)) {
 	case "xiaov2board", "v2board":
 		return generate(u.SourceID)
+	case "sspanelv3":
+		// ss-panel v3 的邀请码是 4 字符短码（ss_invite_code），跨用户极易冲突，
+		// 重新生成商业版格式；邀请关系仍由 referer_id 回填保证。
+		return generate(u.SourceID)
 	default:
 		return truncateReferCode(u.ReferCode)
 	}
