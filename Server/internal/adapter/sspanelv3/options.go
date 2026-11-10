@@ -26,6 +26,9 @@ type Options struct {
 	Salt string
 }
 
+// maxPasswordSaltLength NPanel user.salt 字段上限（v1.1.1 起为 128，旧版 20）。
+const maxPasswordSaltLength = 128
+
 // ss-panel v3 的 datetime 哨兵值（"1989-06-04 00:05:00" 表示空/无效/已过期，
 // 远期年份（2099/3001 等）表示永久有效）。来源：面板注册默认值与 Cron 激活逻辑。
 const (

@@ -74,7 +74,7 @@ func DryRun(ctx context.Context, cfg db.Config, opts Options) (*DryRunReport, er
 
 // checkPasswordCompatibility 按哈希长度分布识别算法，校验全局 salt 是否可用。
 // 源面板 pwdMethod（md5/sha256）均为 password+salt 形式；
-// NPanel 侧 sha256salt 需 v1.1.0+（MultiPasswordVerify 已支持）。
+// NPanel 侧 sha256salt 需 v1.1.0+；salt 超过 20 字符需 v1.1.1+（列宽 128）。
 func (r *DryRunReport) checkPasswordCompatibility(ctx context.Context, cfg db.Config, opts Options) {
 	var lengths []struct {
 		length int64
@@ -126,9 +126,16 @@ func (r *DryRunReport) checkPasswordCompatibility(ctx context.Context, cfg db.Co
 			saltUsers, nil)
 		return
 	}
+	// NPanel user.salt 上限 128 字符（v1.1.1 起；旧版为 20），超长直接阻断。
+	if opts.Salt != "" && len(opts.Salt) > maxPasswordSaltLength {
+		r.add(SeverityError, "password_salt_too_long",
+			fmt.Sprintf("全局 salt 长度 %d 超过 NPanel 上限 %d 字符，无法迁移，请协调面板侧放宽限制", len(opts.Salt), maxPasswordSaltLength),
+			0, nil)
+		return
+	}
 	if saltUsers > 0 {
 		r.add(SeverityInfo, "password_salt",
-			fmt.Sprintf("已提供全局 salt，%d 个用户将按带盐算法（sha256salt/md5salt）迁移，原密码可继续使用（需 NPanel v1.1.0+）", saltUsers),
+			fmt.Sprintf("已提供全局 salt，%d 个用户将按带盐算法（sha256salt/md5salt）迁移，原密码可继续使用（需 NPanel v1.1.1+）", saltUsers),
 			saltUsers, nil)
 	}
 	if bcryptUsers > 0 {
