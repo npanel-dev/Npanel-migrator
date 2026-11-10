@@ -6,7 +6,8 @@
 //	v2board:     v2_user + 无 v2_server_v2node（比 xiao 少扩展表）
 //	Xboard:      v2_server（聚合节点表）+ v2_server_machine
 //	PPanel:      servers + nodes + user（无 v2_ 前缀，Go 风格表名）
-//	SSPanel:     user + product + node（有 product 商品表，无 v2_ 前缀）
+//	SSPanel-UIM: user + product + node（有 product 商品表，无 v2_ 前缀）
+//	sspanelv3:   user + ss_node + shop（早期 ss-panel v3 系，shop/bought 售卖模型）
 //	NPanel:      user + subscribe + subscribe_price_option（ent 产物）
 //
 // 探测顺序按"特征越鲜明越优先"，避免误判（如 xiaov2board 必须先于 v2board 判定）。
@@ -28,8 +29,11 @@ const (
 	PanelXboard      PanelType = "xboard"
 	PanelPPanel      PanelType = "ppanel"
 	PanelSSPanel     PanelType = "sspanel"
-	PanelNPanel      PanelType = "npanel"
-	PanelUnknown     PanelType = "unknown"
+	// PanelSSPanelV3 早期 ss-panel v3（mod 系）：shop/bought 售卖模型 + ss_node 节点表，
+	// 与 SSPanel-UIM（product/order）是不同的表结构。
+	PanelSSPanelV3 PanelType = "sspanelv3"
+	PanelNPanel    PanelType = "npanel"
+	PanelUnknown   PanelType = "unknown"
 )
 
 // Result 是探测结果。
@@ -60,6 +64,10 @@ var probeTables = []string{
 	"product",
 	"node",
 	"link",
+	// ss-panel v3（早期版）
+	"ss_node",
+	"shop",
+	"bought",
 }
 
 // Detect 探测源端数据库的面板类型。
@@ -119,6 +127,12 @@ func DetectFromTables(found map[string]bool, declared string) *Result {
 		r.Panel = PanelSSPanel
 		r.Confidence = "高（命中 product 商品表）"
 		r.MatchedTables = matched(found, "user", "product", "node", "link")
+
+	// 7. sspanelv3：user + ss_node + shop（早期 ss-panel v3 的售卖/节点模型）
+	case has("user") && has("ss_node") && has("shop"):
+		r.Panel = PanelSSPanelV3
+		r.Confidence = "高（命中 ss_node + shop，早期 ss-panel v3 表结构）"
+		r.MatchedTables = matched(found, "user", "ss_node", "shop", "bought")
 
 	default:
 		r.Panel = PanelUnknown

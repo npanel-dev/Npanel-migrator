@@ -14,7 +14,6 @@ import (
 
 	"github.com/npanel-dev/NPanel-backend/ent"
 
-	"npanel-migrator/internal/adapter/xiaov2board"
 	"npanel-migrator/internal/data/canonical"
 	"npanel-migrator/internal/data/checkpoint"
 	"npanel-migrator/internal/data/db"
@@ -26,9 +25,11 @@ import (
 var errMigrationCancelled = errors.New("migration cancelled")
 
 type storedImportOptions struct {
-	Modules         []string        `json:"modules"`
-	PlanMappings    []PlanMapping   `json:"planMappings"`
-	TrialAssignment TrialAssignment `json:"trialAssignment"`
+	Modules            []string        `json:"modules"`
+	PlanMappings       []PlanMapping   `json:"planMappings"`
+	TrialAssignment    TrialAssignment `json:"trialAssignment"`
+	SourcePwdMethod    string          `json:"sourcePwdMethod,omitempty"`
+	SourcePasswordSalt string          `json:"sourcePasswordSalt,omitempty"`
 }
 
 func (s *MigrationService) runImportFast(
@@ -53,12 +54,14 @@ func (s *MigrationService) runImportFast(
 		failFast(nil, jobID, "面板探测失败: "+err.Error())
 		return
 	}
-	if !isV2boardFamily(result.Panel) {
-		failFast(nil, jobID, fmt.Sprintf(
-			"已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）",
-			result.Panel,
-		))
+	adapter, err := adapterFor(result.Panel)
+	if err != nil {
+		failFast(nil, jobID, err.Error())
 		return
+	}
+	extract := adapter.Extract(ctx, sourceCfg)
+	sourceOpts := SourceOptions{
+		PwdMethod: req.SourcePwdMethod, Salt: req.SourcePasswordSalt,
 	}
 
 	sourcePool, err := db.OpenPool(ctx, sourceCfg)
@@ -89,7 +92,7 @@ func (s *MigrationService) runImportFast(
 	attachActiveStore(jobID, store)
 
 	job, err := prepareMigrationJob(
-		ctx, store, sourcePool, sourceCfg, targetCfg,
+		ctx, store, adapter, sourcePool, sourceCfg, targetCfg,
 		string(result.Panel), req, jobID, owner,
 	)
 	if err != nil {
@@ -132,7 +135,7 @@ func (s *MigrationService) runImportFast(
 	modules := req.Modules
 
 	if hasModule(modules, ModuleNodes) {
-		groups, err := xiaov2board.ExtractNodeGroups(ctx, sourceCfg)
+		groups, err := extract.NodeGroups(ctx, sourceCfg)
 		if err != nil {
 			failFast(store, jobID, "读取节点分组失败: "+err.Error())
 			return
@@ -157,8 +160,8 @@ func (s *MigrationService) runImportFast(
 
 	var preparedSubscriptions []*canonical.UserSubscription
 	if hasModule(modules, ModuleSubscriptions) {
-		preparedSubscriptions, err = xiaov2board.ExtractSubscriptionsAtPoolUntil(
-			ctx, sourcePool, sourceCfg.Database, job.TrialAnchorTime,
+		preparedSubscriptions, err = extract.Subscriptions(
+			ctx, sourcePool, job.TrialAnchorTime,
 			job.UserHighWater, job.OrderHighWater,
 		)
 		if err != nil {
@@ -174,10 +177,7 @@ func (s *MigrationService) runImportFast(
 	}
 
 	if hasModule(modules, ModuleUsers) {
-		totalUsers, err := db.QueryScalarDBWithTimeout(
-			ctx, sourcePool, 30*time.Second,
-			"SELECT COUNT(*) FROM v2_user WHERE id <= ?", job.UserHighWater,
-		)
+		totalUsers, err := adapter.CountUsers(ctx, sourcePool, job.UserHighWater)
 		if err != nil {
 			failFast(store, jobID, "统计用户失败: "+err.Error())
 			return
@@ -195,8 +195,8 @@ func (s *MigrationService) runImportFast(
 			progress.PhaseUsers, "迁移用户",
 			int(userCP.Done), int(userCP.Total), int(userCP.Errors),
 		)
-		err = xiaov2board.ExtractUsersKeyset(
-			ctx, sourcePool, batchSize,
+		err = extract.UsersKeyset(
+			ctx, sourcePool, sourceOpts, batchSize,
 			userCP.LastSourceID, job.UserHighWater,
 			func(batch []*canonical.User) error {
 				if cancellationRequested(ctx, store, jobID) {
@@ -238,8 +238,8 @@ func (s *MigrationService) runImportFast(
 			progress.PhaseReferBackfill, "回填邀请关系",
 			int(referCP.Done), int(referCP.Total), int(referCP.Errors),
 		)
-		err = xiaov2board.ExtractUsersKeyset(
-			ctx, sourcePool, batchSize,
+		err = extract.UsersKeyset(
+			ctx, sourcePool, sourceOpts, batchSize,
 			referCP.LastSourceID, job.UserHighWater,
 			func(batch []*canonical.User) error {
 				if cancellationRequested(ctx, store, jobID) {
@@ -266,10 +266,7 @@ func (s *MigrationService) runImportFast(
 	}
 
 	if hasModule(modules, ModuleOrders) {
-		totalOrders, err := db.QueryScalarDBWithTimeout(
-			ctx, sourcePool, 30*time.Second,
-			"SELECT COUNT(*) FROM v2_order WHERE id <= ?", job.OrderHighWater,
-		)
+		totalOrders, err := adapter.CountOrders(ctx, sourcePool, job.OrderHighWater)
 		if err != nil {
 			failFast(store, jobID, "统计订单失败: "+err.Error())
 			return
@@ -287,7 +284,7 @@ func (s *MigrationService) runImportFast(
 			progress.PhaseOrders, "迁移订单",
 			int(orderCP.Done), int(orderCP.Total), int(orderCP.Errors),
 		)
-		err = xiaov2board.ExtractOrdersKeyset(
+		err = extract.OrdersKeyset(
 			ctx, sourcePool, batchSize,
 			orderCP.LastSourceID, job.OrderHighWater,
 			func(batch []*canonical.Order) error {
@@ -373,7 +370,7 @@ func (s *MigrationService) runImportFast(
 	}
 
 	if hasModule(modules, ModuleNodes) {
-		nodes, err := xiaov2board.ExtractNodes(ctx, sourceCfg)
+		nodes, err := extract.Nodes(ctx, sourceCfg)
 		if err != nil {
 			failFast(store, jobID, "读取节点失败: "+err.Error())
 			return
@@ -394,7 +391,7 @@ func (s *MigrationService) runImportFast(
 	}
 
 	if hasModule(modules, ModuleCoupons) {
-		coupons, err := xiaov2board.ExtractCoupons(ctx, sourceCfg)
+		coupons, err := extract.Coupons(ctx, sourceCfg)
 		if err != nil {
 			failFast(store, jobID, "读取优惠券失败: "+err.Error())
 			return
@@ -415,7 +412,7 @@ func (s *MigrationService) runImportFast(
 	}
 
 	if hasModule(modules, ModuleNotices) {
-		notices, err := xiaov2board.ExtractNotices(ctx, sourceCfg)
+		notices, err := extract.Notices(ctx, sourceCfg)
 		if err != nil {
 			failFast(store, jobID, "读取公告失败: "+err.Error())
 			return
@@ -436,7 +433,7 @@ func (s *MigrationService) runImportFast(
 	}
 
 	if hasModule(modules, ModuleTickets) {
-		tickets, err := xiaov2board.ExtractTickets(ctx, sourceCfg)
+		tickets, err := extract.Tickets(ctx, sourceCfg)
 		if err != nil {
 			failFast(store, jobID, "读取工单失败: "+err.Error())
 			return
@@ -471,6 +468,7 @@ func (s *MigrationService) runImportFast(
 func prepareMigrationJob(
 	ctx context.Context,
 	store *checkpoint.Store,
+	adapter *sourceAdapter,
 	sourcePool *sql.DB,
 	sourceCfg db.Config,
 	targetCfg writer.NPanelConfig,
@@ -502,17 +500,7 @@ func prepareMigrationJob(
 		return job, nil
 	}
 
-	userHighWater, err := db.QueryScalarDBWithTimeout(
-		ctx, sourcePool, 30*time.Second,
-		"SELECT COALESCE(MAX(id), 0) FROM v2_user",
-	)
-	if err != nil {
-		return nil, err
-	}
-	orderHighWater, err := db.QueryScalarDBWithTimeout(
-		ctx, sourcePool, 30*time.Second,
-		"SELECT COALESCE(MAX(id), 0) FROM v2_order",
-	)
+	userHighWater, orderHighWater, err := adapter.HighWaters(ctx, sourcePool)
 	if err != nil {
 		return nil, err
 	}
@@ -607,6 +595,7 @@ func stableOptions(req *ImportRequest) (string, string, error) {
 	})
 	payload, err := json.Marshal(storedImportOptions{
 		Modules: modules, PlanMappings: mappings, TrialAssignment: req.TrialAssignment,
+		SourcePwdMethod: req.SourcePwdMethod, SourcePasswordSalt: req.SourcePasswordSalt,
 	})
 	if err != nil {
 		return "", "", err
@@ -655,6 +644,9 @@ func hydrateResumeOptions(ctx context.Context, req *ImportRequest) error {
 	req.Modules = options.Modules
 	req.PlanMappings = options.PlanMappings
 	req.TrialAssignment = options.TrialAssignment
+	// 恢复时保留原任务的面板级选项（盐值等），避免与原任务口径不一致。
+	req.SourcePwdMethod = options.SourcePwdMethod
+	req.SourcePasswordSalt = options.SourcePasswordSalt
 	return nil
 }
 

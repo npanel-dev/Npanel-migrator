@@ -19,11 +19,19 @@ export default {
     xboard: 'Xboard',
     ppanel: 'PPanel',
     sspanel: 'SSPanel-UIM',
+    sspanelv3: 'SSPanel 早期版',
   },
 
   // 面板选择分组标签
   panelLabel: '面板类型',
   selectPanelPlaceholder: '选择迁移源面板',
+
+  // ss-panel v3 面板级密码配置
+  pwdMethodLabel: '密码算法',
+  pwdMethodAuto: '自动识别（按哈希长度）',
+  pwdSaltLabel: '密码 Salt',
+  pwdSaltPlaceholder: '源面板 config.php 的 $_ENV["salt"]',
+  pwdSaltTip: '早期 ss-panel 的密码为 sha256/md5(password+salt)，未填 Salt 时预演会阻断迁移',
 
   // 源端面板
   sourcePanel: '源端面板',

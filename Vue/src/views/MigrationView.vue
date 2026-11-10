@@ -26,6 +26,27 @@
               </el-radio-group>
             </el-form-item>
 
+            <!-- ss-panel v3 面板级密码配置（config.php 的 pwdMethod/salt） -->
+            <template v-if="isSSPanelV3">
+              <el-form-item :label="t('pwdMethodLabel')">
+                <el-select
+                  v-model="panelPasswordOptions.pwdMethod"
+                  style="width: 100%"
+                >
+                  <el-option :label="t('pwdMethodAuto')" value="" />
+                  <el-option label="sha256" value="sha256" />
+                  <el-option label="md5" value="md5" />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="t('pwdSaltLabel')">
+                <el-input
+                  v-model="panelPasswordOptions.salt"
+                  :placeholder="t('pwdSaltPlaceholder')"
+                />
+                <div class="form-tip">{{ t('pwdSaltTip') }}</div>
+              </el-form-item>
+            </template>
+
             <el-form-item :label="t('databaseHost')">
               <el-input v-model="source.host" placeholder="127.0.0.1" />
             </el-form-item>
@@ -460,6 +481,7 @@ const panels = [
   { value: 'xboard' },
   { value: 'ppanel' },
   { value: 'sspanel' },
+  { value: 'sspanelv3' },
 ]
 
 // 迁移模式（labelKey/descKey 指向 i18n 文案 key）。
@@ -505,6 +527,24 @@ const sourceTesting = ref(false)
 const targetTesting = ref(false)
 const sourceResult = ref<TestConnectionResult | null>(null)
 const targetResult = ref<TestConnectionResult | null>(null)
+
+// ss-panel v3 的面板级密码配置（来自源面板 config.php 的 pwdMethod/salt）。
+const panelPasswordOptions = reactive({ pwdMethod: '', salt: '' })
+// 生效面板（显式选择或自动探测结果）。
+const effectivePanel = computed(() =>
+  source.panel === 'auto'
+    ? sourceResult.value?.detail?.panel
+    : source.panel,
+)
+const isSSPanelV3 = computed(() => effectivePanel.value === 'sspanelv3')
+// 随请求发送的密码选项（仅 sspanelv3 面板携带）。
+function passwordOptionsPayload() {
+  if (!isSSPanelV3.value) return undefined
+  return {
+    pwdMethod: panelPasswordOptions.pwdMethod || undefined,
+    passwordSalt: panelPasswordOptions.salt || undefined,
+  }
+}
 const mode = ref('full')
 // 选中的迁移模块（完整迁移默认全选）。
 const selectedModules = ref<string[]>([...allModuleValues])
@@ -754,6 +794,7 @@ async function onTestTarget() {
 }
 
 function migrationConnectionRequest() {
+  const passwordOptions = passwordOptionsPayload()
   return {
     sourceHost: source.host,
     sourcePort: source.port,
@@ -763,6 +804,8 @@ function migrationConnectionRequest() {
     sourcePanel: source.panel === 'auto'
       ? sourceResult.value?.detail?.panel
       : source.panel,
+    sourcePwdMethod: passwordOptions?.pwdMethod,
+    sourcePasswordSalt: passwordOptions?.passwordSalt,
     targetHost: target.host,
     targetPort: target.port,
     targetDatabase: target.database,
@@ -923,6 +966,7 @@ async function onDetect() {
         username: source.username, password: source.password,
       },
       source.panel === 'auto' ? undefined : source.panel,
+      passwordOptionsPayload(),
     )
     if (resp.ok) {
       currentTaskType = 'detect'
@@ -950,6 +994,7 @@ async function onDryRun() {
         username: source.username, password: source.password,
       },
       source.panel === 'auto' ? undefined : source.panel,
+      passwordOptionsPayload(),
     )
     if (resp.ok) {
       currentTaskType = 'dryrun'
@@ -1299,5 +1344,12 @@ function formatDBLabel(detail: { dbType?: string; dbMajor?: string }): string {
 
 .report-wrapper {
   margin-top: 20px;
+}
+
+.form-tip {
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.5;
+  margin-top: 4px;
 }
 </style>

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"npanel-migrator/internal/adapter/xiaov2board"
+	"npanel-migrator/internal/data/detector"
 )
 
 func TestValidateModuleDependencies(t *testing.T) {
@@ -27,6 +27,31 @@ func TestValidateModuleDependencies(t *testing.T) {
 				t.Fatalf("validateModuleDependencies(%v) error = %v, wantErr %v", tt.modules, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestAdapterForSupportedPanels(t *testing.T) {
+	for _, panel := range []detector.PanelType{
+		detector.PanelXiaoV2board, detector.PanelV2board, detector.PanelSSPanelV3,
+	} {
+		adapter, err := adapterFor(panel)
+		if err != nil {
+			t.Fatalf("adapterFor(%s) error = %v", panel, err)
+		}
+		if adapter.Panel != panel {
+			t.Errorf("adapterFor(%s).Panel = %s", panel, adapter.Panel)
+		}
+		if adapter.Extract == nil || adapter.PlanStats == nil || adapter.HighWaters == nil {
+			t.Errorf("adapterFor(%s) 缺少调度函数", panel)
+		}
+	}
+	for _, panel := range []detector.PanelType{
+		detector.PanelXboard, detector.PanelPPanel, detector.PanelSSPanel,
+		detector.PanelNPanel, detector.PanelUnknown,
+	} {
+		if _, err := adapterFor(panel); err == nil {
+			t.Errorf("adapterFor(%s) 应返回未支持错误", panel)
+		}
 	}
 }
 
@@ -81,6 +106,24 @@ func TestStableOptionsIsOrderIndependentAndExcludesCredentials(t *testing.T) {
 	}
 }
 
+func TestStableOptionsIncludesPanelPasswordOptions(t *testing.T) {
+	base := &ImportRequest{Modules: []string{ModuleUsers}}
+	changed := &ImportRequest{Modules: []string{ModuleUsers}}
+	changed.SourcePasswordSalt = "panel-salt"
+	changed.SourcePwdMethod = "sha256"
+	_, baseHash, err := stableOptions(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, changedHash, err := stableOptions(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseHash == changedHash {
+		t.Fatal("面板密码选项（salt/pwdMethod）应参与 options hash")
+	}
+}
+
 func TestConfigFingerprintNormalization(t *testing.T) {
 	first := configFingerprint("XiaoV2Board", "DB.EXAMPLE.COM ", 3306, "V2BOARD")
 	second := configFingerprint("xiaov2board", "db.example.com", 3306, "v2board")
@@ -94,10 +137,10 @@ func TestConfigFingerprintNormalization(t *testing.T) {
 
 func TestDryRunBlockingError(t *testing.T) {
 	t.Run("allows successful report", func(t *testing.T) {
-		report := &xiaov2board.DryRunReport{
-			Summary: xiaov2board.DryRunSummary{CanProceed: true},
-			Issues: []xiaov2board.Issue{
-				{Severity: xiaov2board.SeverityWarning, Message: "warning only"},
+		report := &dryRunOutcome{
+			CanProceed: true,
+			Issues: []dryRunIssue{
+				{Severity: "warning", Message: "warning only"},
 			},
 		}
 		if err := dryRunBlockingError(report); err != nil {
@@ -106,11 +149,11 @@ func TestDryRunBlockingError(t *testing.T) {
 	})
 
 	t.Run("blocks error issues", func(t *testing.T) {
-		report := &xiaov2board.DryRunReport{
-			Summary: xiaov2board.DryRunSummary{CanProceed: false, ErrorCount: 1},
-			Issues: []xiaov2board.Issue{
+		report := &dryRunOutcome{
+			CanProceed: false, ErrorCount: 1,
+			Issues: []dryRunIssue{
 				{
-					Severity: xiaov2board.SeverityError,
+					Severity: "error",
 					Message:  "存在不支持的密码哈希",
 					Count:    3,
 				},

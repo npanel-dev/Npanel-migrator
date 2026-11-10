@@ -20,6 +20,7 @@ NPanel Migrator is a migration tool for importing data from legacy proxy panels 
 | --- | --- | --- |
 | xiaov2board | Supported | Implemented for users, plans, subscriptions, orders, node groups, nodes, coupons, notices, and tickets. |
 | v2board | Supported | Implemented through the v2board-family adapter. Legacy schema differences are handled for plans, Trojan, and Hysteria nodes. |
+| SSPanel 早期版 (ss-panel v3) | Supported | Implemented through the sspanelv3 adapter for `shop`/`bought`/`ss_node` databases: users (sha256salt/md5salt passwords with the global salt), shop→plan mapping, subscriptions derived from `user` state + latest `bought`, orders synthesized from `bought` + `code`, nodes (SS/V2Ray/Trojan, per-user port model flagged), coupons, notices, and tickets. Requires NPanel v1.1.1+ for `sha256salt` login and long password salts. |
 | Xboard | Planned | Not yet implemented. |
 | PPanel | Planned | Not yet implemented. |
 | SSPanel-UIM | Planned | Not yet implemented. |
@@ -126,6 +127,7 @@ By default, the HTTP server listens on `0.0.0.0:8000`.
 | --- | --- | --- |
 | xiaov2board | 已支持 | 已实现用户、套餐、订阅、订单、节点分组、节点、优惠券、公告、工单迁移。 |
 | v2board | 已支持 | 通过 v2board-family adapter 实现；已兼容普通 v2board 的套餐、Trojan、Hysteria 字段差异。 |
+| SSPanel 早期版 (ss-panel v3) | 已支持 | 通过 sspanelv3 adapter 支持 `shop`/`bought`/`ss_node` 表结构：用户（sha256salt/md5salt 全局盐密码）、shop→套餐映射、订阅从 `user` 状态+最近 `bought` 推导、订单由 `bought`+`code` 合成、节点（SS/V2Ray/Trojan，每用户端口模型差异会提示）、优惠券、公告、工单。登录兼容与长密码盐需 NPanel v1.1.1+。 |
 | Xboard | 规划中 | 暂未实现。 |
 | PPanel | 规划中 | 暂未实现。 |
 | SSPanel-UIM | 规划中 | 暂未实现。 |

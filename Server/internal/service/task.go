@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"npanel-migrator/internal/adapter/xiaov2board"
 	"npanel-migrator/internal/data/db"
 	"npanel-migrator/internal/data/detector"
 	"npanel-migrator/internal/data/progress"
@@ -57,25 +56,24 @@ func (s *MigrationService) runDetect(req *DetectRequest) {
 		return
 	}
 	detectTracker.LogInfo(fmt.Sprintf("识别为 %s 面板", result.Panel))
-	if !isV2boardFamily(result.Panel) {
-		detectTracker.Fail(fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel))
+	adapter, err := adapterFor(result.Panel)
+	if err != nil {
+		detectTracker.Fail(err.Error())
 		return
 	}
 
 	// 执行 adapter 的 detect。
 	detectTracker.Update(progress.PhasePlans, "正在统计表行数", 0, 19, 0)
 	detectTracker.LogInfo("正在统计各表行数...")
-	report, err := xiaov2board.Detect(ctx, cfg)
+	report, err := adapter.Detect(ctx, cfg)
 	if err != nil {
 		detectTracker.Fail("生成报告失败: " + err.Error())
 		detectTracker.LogError("生成报告失败: " + err.Error())
 		return
 	}
-	report.Panel = string(result.Panel)
 
 	// 缓存结果供 GetTaskProgress 返回（detect 完成后前端轮询拿报告）。
 	lastDetectReport = report
-	lastDetectPanel = string(result.Panel)
 
 	detectTracker.Update(progress.PhaseDone, "探测完成", 19, 19, 0)
 	detectTracker.LogInfo(fmt.Sprintf("探测完成：共 %d 张表，总行数 %d", len(report.Tables), report.TotalRows))
@@ -113,25 +111,27 @@ func (s *MigrationService) runDryRun(req *DryRunRequest) {
 		return
 	}
 	dryRunTracker.LogInfo(fmt.Sprintf("识别为 %s 面板，开始冲突检测...", result.Panel))
-	if !isV2boardFamily(result.Panel) {
-		dryRunTracker.Fail(fmt.Sprintf("已识别为 %s 面板，但该 adapter 暂未实现（当前支持 xiaov2board/v2board）", result.Panel))
+	adapter, err := adapterFor(result.Panel)
+	if err != nil {
+		dryRunTracker.Fail(err.Error())
 		return
 	}
 
 	dryRunTracker.Update(progress.PhasePlans, "正在检测冲突", 0, 9, 0)
-	report, err := xiaov2board.DryRun(ctx, cfg)
+	report, err := adapter.DryRun(ctx, cfg, SourceOptions{
+		PwdMethod: req.PwdMethod, Salt: req.PasswordSalt,
+	})
 	if err != nil {
 		dryRunTracker.Fail("预演失败: " + err.Error())
 		return
 	}
-	report.Panel = string(result.Panel)
 
 	// 记录检测到的问题到日志。
 	for _, iss := range report.Issues {
 		switch iss.Severity {
-		case xiaov2board.SeverityError:
+		case "error":
 			dryRunTracker.LogError(fmt.Sprintf("[%s] %s (受影响 %d)", iss.Category, iss.Message, iss.Count))
-		case xiaov2board.SeverityWarning:
+		case "warning":
 			dryRunTracker.LogWarn(fmt.Sprintf("[%s] %s (受影响 %d)", iss.Category, iss.Message, iss.Count))
 		default:
 			dryRunTracker.LogInfo(fmt.Sprintf("[%s] %s", iss.Category, iss.Message))
@@ -142,19 +142,18 @@ func (s *MigrationService) runDryRun(req *DryRunRequest) {
 	lastDryRunReport = report
 
 	canProceed := "不可继续"
-	if report.Summary.CanProceed {
+	if report.CanProceed {
 		canProceed = "可以继续"
 	}
-	dryRunTracker.Update(progress.PhaseDone, "预演完成", 9, 9, report.Summary.ErrorCount)
+	dryRunTracker.Update(progress.PhaseDone, "预演完成", 9, 9, report.ErrorCount)
 	dryRunTracker.Complete(fmt.Sprintf("预演完成：%s（错误 %d、警告 %d）",
-		canProceed, report.Summary.ErrorCount, report.Summary.WarningCount))
+		canProceed, report.ErrorCount, report.WarningCount))
 }
 
-// 缓存最近一次 detect/dry-run 的结果，供完成后的轮询返回。
+// 缓存最近一次 detect/dry-run 的结果，供完成后的轮询返回（中性类型，跨 adapter）。
 var (
-	lastDetectReport *xiaov2board.DetectReport
-	lastDetectPanel  string
-	lastDryRunReport *xiaov2board.DryRunReport
+	lastDetectReport *DetectData
+	lastDryRunReport *dryRunOutcome
 )
 
 // TaskProgressResponse 任务进度响应（含日志和完成后的报告）。
@@ -171,35 +170,12 @@ func (s *MigrationService) GetTaskProgress(taskType string) *TaskProgressRespons
 	case TaskDryRun:
 		tracker = dryRunTracker
 		if lastDryRunReport != nil {
-			report = convertDryRunReport(lastDryRunReport)
+			report = dryRunOutcomeToVO(lastDryRunReport)
 		}
 	default: // detect
 		tracker = detectTracker
 		if lastDetectReport != nil {
-			report = &DetectData{
-				Panel:     lastDetectPanel,
-				TotalRows: lastDetectReport.TotalRows,
-			}
-			// 填充 tables 和 metrics。
-			for _, t := range lastDetectReport.Tables {
-				(*report.(*DetectData)).Tables = append((*report.(*DetectData)).Tables, TableStat{
-					Name: t.Name, Rows: t.Rows, Comment: t.Comment,
-				})
-			}
-			(*report.(*DetectData)).Metrics = DetectMetrics{
-				UserTotal:         lastDetectReport.Metrics.UserTotal,
-				UserActive:        lastDetectReport.Metrics.UserActive,
-				UserBanned:        lastDetectReport.Metrics.UserBanned,
-				BalanceTotal:      lastDetectReport.Metrics.BalanceTotal,
-				ActiveSubscribers: lastDetectReport.Metrics.ActiveSubscribers,
-				PlanTotal:         lastDetectReport.Metrics.PlanTotal,
-				PlanOnSale:        lastDetectReport.Metrics.PlanOnSale,
-				OrderTotal:        lastDetectReport.Metrics.OrderTotal,
-				OrderCompleted:    lastDetectReport.Metrics.OrderCompleted,
-				NodeTotal:         lastDetectReport.Metrics.NodeTotal,
-				CouponEnable:      lastDetectReport.Metrics.CouponEnable,
-				TicketOpen:        lastDetectReport.Metrics.TicketOpen,
-			}
+			report = lastDetectReport
 		}
 	}
 	snap := tracker.Snapshot()
